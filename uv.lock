@@ -792,6 +792,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "httpx2" },
     { name = "mcp" },
     { name = "pyarrow" },
     { name = "pydantic" },
@@ -818,6 +819,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = "==0.156.8" },
     { name = "httpx", specifier = "==0.28.1" },
+    { name = "httpx2", specifier = "==2.16.0" },
     { name = "mcp", specifier = "==2.3.0" },
     { name = "pyarrow", specifier = "==26.0.0" },
     { name = "pydantic", specifier = "==2.14.1" },

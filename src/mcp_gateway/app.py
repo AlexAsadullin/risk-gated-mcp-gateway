@@ -71,8 +71,14 @@ class HttpApp:
     gateway: Gateway
 
 
-def build_http_app(gateway: Gateway, credentials: CredentialSource | None = None) -> HttpApp:
-    """FastAPI app serving the admin API under ``server.admin_prefix`` and MCP (streamable HTTP) at ``mcp_path``."""
+def build_http_app(
+    gateway: Gateway, credentials: CredentialSource | None = None, *, owns_gateway: bool = True
+) -> HttpApp:
+    """FastAPI app serving the admin API under ``server.admin_prefix`` and MCP (streamable HTTP) at ``mcp_path``.
+
+    With ``owns_gateway`` the app closes the downstream clients on shutdown; harnesses that reuse the gateway
+    after the server stops pass ``False``.
+    """
     server_cfg = gateway.settings.server
     mcp = build_mcp_server(gateway, credentials or header_credentials(gateway.settings.auth))
     mcp_app = mcp.streamable_http_app(
@@ -91,7 +97,8 @@ def build_http_app(gateway: Gateway, credentials: CredentialSource | None = None
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with mcp.session_manager.run():
             yield
-        await gateway.downstream.aclose()
+        if owns_gateway:
+            await gateway.downstream.aclose()
 
     app = FastAPI(title="Tradeq risk-gated MCP gateway", version="0.1.0", lifespan=lifespan)
     app.add_exception_handler(AdminRejection, admin_rejection_handler)

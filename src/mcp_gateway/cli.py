@@ -11,10 +11,14 @@ import uvicorn
 
 from mcp_gateway.admin_models import CreateSessionRequest
 from mcp_gateway.app import build_gateway, build_http_app
+from mcp_gateway.bench.report import run_report
 from mcp_gateway.demo import audit_line, run_demo
+from mcp_gateway.fakes.services import FakePlatform
+from mcp_gateway.fakes.world import world_from_settings
 from mcp_gateway.logging_setup import configure_logging
 from mcp_gateway.mcp_server import build_mcp_server, fixed_credentials
 from mcp_gateway.settings import Mode, load_settings
+from mcp_gateway.timeutil import ManualClock, parse_iso
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
@@ -29,12 +33,19 @@ def serve() -> None:
 
 
 @app.command()
-def stdio() -> None:
+def stdio(
+    offline: Annotated[bool, typer.Option(help="Use the in-process fakes instead of real services.")] = False,
+) -> None:
     """Serve MCP over stdio for the session whose key is in GATEWAY_AGENT_API_KEY."""
     settings = load_settings()
     if settings.agent_api_key is None:
         raise typer.BadParameter("set GATEWAY_AGENT_API_KEY to the session's API key")
-    gateway = build_gateway(settings)
+    if offline:
+        clock = ManualClock(parse_iso(settings.demo.wall_clock))
+        platform = FakePlatform(world=world_from_settings(settings.fakes), cfg=settings.fakes, clock=clock)
+        gateway = build_gateway(settings, clock=clock, transports=platform.transports())
+    else:
+        gateway = build_gateway(settings)
     server = build_mcp_server(gateway, fixed_credentials(settings.agent_api_key.get_secret_value()))
     configure_logging(settings.server.log_level)
     asyncio.run(server.run_stdio_async())
@@ -73,8 +84,6 @@ def reproduce() -> None:
 @app.command()
 def report() -> None:
     """Run the report experiments and write metric tables under the data root."""
-    from mcp_gateway.experiments import run_report
-
     settings = load_settings()
     configure_logging("WARNING")
     tables = asyncio.run(run_report(settings))

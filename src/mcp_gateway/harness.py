@@ -50,13 +50,28 @@ class Harness:
     admin_key: str
 
     @classmethod
-    def create(cls, settings: Settings, *, admin_key: str, down: set[str] | None = None) -> Harness:
+    def create(
+        cls,
+        settings: Settings,
+        *,
+        admin_key: str,
+        down: set[str] | None = None,
+        leak_future_rows: bool = False,
+        overrides: dict[str, httpx.AsyncBaseTransport] | None = None,
+    ) -> Harness:
+        """Wire the gateway to fresh fakes. ``down`` simulates outages; ``overrides`` swaps single services."""
         settings = settings.model_copy(update={"admin_api_key": SecretStr(admin_key)})
         clock = ManualClock(parse_iso(settings.demo.wall_clock))
-        platform = FakePlatform(world=world_from_settings(settings.fakes), cfg=settings.fakes, clock=clock)
-        platform.down = set(down or ())
-        gateway = build_gateway(settings, clock=clock, transports=platform.transports())
-        return cls(settings, clock, platform, gateway, build_http_app(gateway), admin_key)
+        platform = FakePlatform(
+            world=world_from_settings(settings.fakes),
+            cfg=settings.fakes,
+            clock=clock,
+            down=set(down or ()),
+            leak_future_rows=leak_future_rows,
+        )
+        transports = platform.transports() | dict(overrides or {})
+        gateway = build_gateway(settings, clock=clock, transports=transports)
+        return cls(settings, clock, platform, gateway, build_http_app(gateway, owns_gateway=False), admin_key)
 
     def admin_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
