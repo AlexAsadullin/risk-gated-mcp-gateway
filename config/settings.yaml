@@ -1,0 +1,129 @@
+# Risk-gated MCP Gateway (I9) defaults. Override any key with GATEWAY_<SECTION>__<KEY> env variables.
+# Secrets (GATEWAY_ADMIN_API_KEY, GATEWAY_AGENT_API_KEY) and TRADEQ_DATA_DIR come from the environment only.
+
+server:
+  host: 127.0.0.1
+  port: 8608
+  mcp_path: /mcp
+  admin_prefix: /admin/v1
+  json_response: true
+  stateless_http: false
+  allowed_hosts: ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+  allowed_origins: ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+  log_level: INFO
+
+auth:
+  api_key_header: authorization
+  bearer_scheme: bearer
+  # Only honoured together with the admin key: lets an orchestrator (S8) act inside a given session.
+  session_override_header: x-gateway-session
+  api_key_bytes: 32
+
+storage:
+  subdir: risk-gated-mcp-gateway
+  sessions_db: sessions.sqlite3
+  audit_dir: audit
+  audit_file_prefix: audit
+  demo_dir: demo
+
+services:
+  ledger: { base_url: "http://127.0.0.1:8601", timeout_s: 5.0 }
+  pit: { base_url: "http://127.0.0.1:8603", timeout_s: 10.0 }
+  forecast: { base_url: "http://127.0.0.1:8604", timeout_s: 30.0 }
+  leakage: { base_url: "http://127.0.0.1:8605", timeout_s: 60.0 }
+  backtest: { base_url: "http://127.0.0.1:8606", timeout_s: 120.0 }
+  shadow: { base_url: "http://127.0.0.1:8610", timeout_s: 5.0 }
+  # I7 has no assigned port yet; it implements the same Order API as I6 (contract 6.4).
+  execution: { base_url: "http://127.0.0.1:8611", timeout_s: 5.0 }
+
+ledger:
+  source: i9
+  inbox_relpath: research-ledger/inbox
+  family_prefix: risk-gated-mcp-gateway
+  # How agent-facing strategy names map to ledger strategy ids, so two agents never share a strategy.
+  strategy_id_template: "{agent_id}/{strategy}"
+  periods_per_year: 8760.0
+
+clock:
+  allow_rewind: false
+  allow_future: false
+
+modes:
+  live_enabled: false
+  live_require_verdict: true
+  live_require_clean_leakage: true
+
+data:
+  market_data_dataset_template: "tape.{channel}"
+  features_dataset: features
+  channels: [trades, book_delta, book_snapshot, funding, liquidations, open_interest]
+  max_rows: 500
+  max_window_days: 366
+  time_travel_policy: refuse
+  feature_key_columns: [symbol, valid_time, knowledge_time]
+
+forecast:
+  quantiles: [0.1, 0.5, 0.9]
+  max_symbols: 20
+  max_horizon: 168
+
+backtest:
+  fidelities: [vectorised, event, tick, reactive_sim]
+  max_universe: 50
+
+leakage:
+  languages: [en]
+  # Entities sent to S7 are the base asset of each normalised symbol (BTC-USDT-PERP -> BTC).
+  entity_separator: "-"
+  default_window_days: 365
+  flag_event_kind: llm_memorisation
+
+budgets:
+  defaults:
+    capital: 100000.0
+    max_drawdown: 0.10
+    max_order_notional: 10000.0
+    max_orders_per_window: 10
+    order_window_s: 60.0
+    max_tokens: 2000000
+    max_token_cost_usd: 25.0
+    max_latency_ms: 60000.0
+    max_total_latency_ms: 3600000.0
+  on_breach:
+    capital: refuse
+    order_notional: refuse
+    order_rate: refuse
+    drawdown: freeze
+    tokens: freeze
+    token_cost: freeze
+    latency: freeze
+    total_latency: freeze
+  frozen_allowed_tools: [clock, budget, positions, account, verdict]
+
+pricing:
+  default: { input_per_mtok_usd: 3.0, output_per_mtok_usd: 15.0 }
+  models:
+    claude-opus-5-5: { input_per_mtok_usd: 15.0, output_per_mtok_usd: 75.0 }
+    claude-sonnet-4-5: { input_per_mtok_usd: 3.0, output_per_mtok_usd: 15.0 }
+    claude-haiku-4-5: { input_per_mtok_usd: 1.0, output_per_mtok_usd: 5.0 }
+    scripted-llm: { input_per_mtok_usd: 1.0, output_per_mtok_usd: 2.0 }
+  unknown_model_policy: default
+
+risk:
+  whitelist:
+    - { venue: binance, symbol: BTC-USDT-PERP }
+    - { venue: binance, symbol: ETH-USDT-PERP }
+    - { venue: binance, symbol: SOL-USDT-PERP }
+    - { venue: bybit, symbol: BTC-USDT-PERP }
+  max_order_notional: 25000.0
+  max_position_notional: 50000.0
+  price_band_bps: 200.0
+  require_reference_price: true
+  reference:
+    channel: trades
+    lookback_s: 3600.0
+    price_column: price
+
+orders:
+  account_id_template: "agent-{agent_id}"
+  default_time_in_force: GTC
