@@ -25,6 +25,7 @@ storage:
   audit_dir: audit
   audit_file_prefix: audit
   demo_dir: demo
+  reports_dir: reports
 
 services:
   ledger: { base_url: "http://127.0.0.1:8601", timeout_s: 5.0 }
@@ -127,3 +128,30 @@ risk:
 orders:
   account_id_template: "agent-{agent_id}"
   default_time_in_force: GTC
+
+# In-process fakes of the downstream services (tests, make reproduce, make report). Synthetic, not market data.
+fakes:
+  seed: 7
+  bar_seconds: 60
+  knowledge_delay_s: 1
+  cycle_amplitude: 0.02
+  cycle_bars: 720
+  noise_scale: 0.001
+  base_prices: { BTC-USDT-PERP: 60000.0, ETH-USDT-PERP: 3000.0, SOL-USDT-PERP: 150.0 }
+  initial_cash: 100000.0
+  currency: USDT
+  flagged_models: [leaky-llm]
+  verdict_min_sharpe: 1.0
+  verdict_max_trials: 5
+
+demo:
+  agent_id: demo-agent
+  venue: binance
+  symbol: BTC-USDT-PERP
+  known_at: "2025-06-01T00:00:00Z"
+  wall_clock: "2025-06-15T12:00:00Z"
+  model: claude-sonnet-4-5
+  report_seed: 20261021
+  report_episodes: 200
+  report_latency_calls: 300
+  report_bootstrap: 2000

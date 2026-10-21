@@ -196,7 +196,7 @@ class Gateway:
             api_key_hash=hash_api_key(api_key),
         )
         self.store.create(session)
-        self._audit_admin("create_session", session, request.model_dump(mode="json"))
+        self._audit_admin("create_session", session, request.model_dump(mode="json", exclude_none=True))
         view = SessionView.of(session)
         return CreateSessionResponse(**view.model_dump(), api_key=api_key, mcp_path=self.settings.server.mcp_path)
 

@@ -70,6 +70,7 @@ class StorageSettings(BaseModel):
     audit_dir: str
     audit_file_prefix: str
     demo_dir: str
+    reports_dir: str
 
 
 class ServiceEndpoint(BaseModel):
@@ -235,6 +236,38 @@ class OrderSettings(BaseModel):
     default_time_in_force: Literal["GTC", "IOC", "FOK", "POST_ONLY"]
 
 
+class FakeSettings(BaseModel):
+    """Parameters of the in-process fake services used by tests, the demo and the report (not production)."""
+
+    seed: int
+    bar_seconds: int = Field(gt=0)
+    knowledge_delay_s: int = Field(ge=0)
+    cycle_amplitude: float
+    cycle_bars: int = Field(gt=0)
+    noise_scale: float = Field(ge=0)
+    base_prices: dict[str, float]
+    initial_cash: float = Field(gt=0)
+    currency: str
+    flagged_models: list[str]
+    verdict_min_sharpe: float
+    verdict_max_trials: int = Field(gt=0)
+
+
+class DemoSettings(BaseModel):
+    """Scripted demo (make reproduce) and report experiments (make report)."""
+
+    agent_id: str
+    venue: str
+    symbol: str
+    known_at: str
+    wall_clock: str
+    model: str
+    report_seed: int
+    report_episodes: int = Field(gt=0)
+    report_latency_calls: int = Field(gt=0)
+    report_bootstrap: int = Field(gt=0)
+
+
 class Settings(BaseSettings):
     """The gateway's complete configuration."""
 
@@ -264,6 +297,8 @@ class Settings(BaseSettings):
     pricing: PricingSettings
     risk: RiskSettings
     orders: OrderSettings
+    fakes: FakeSettings
+    demo: DemoSettings
 
     @classmethod
     def settings_customise_sources(
@@ -293,6 +328,10 @@ class Settings(BaseSettings):
     @property
     def demo_dir(self) -> Path:
         return self.project_dir / self.storage.demo_dir
+
+    @property
+    def reports_dir(self) -> Path:
+        return self.project_dir / self.storage.reports_dir
 
     @property
     def ledger_inbox_dir(self) -> Path:
