@@ -23,8 +23,10 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GATEWAY_STORAGE__SESSIONS_DB", "other.sqlite3")
     s = load_settings()
     assert s.risk.price_band_bps == 150.0
-    assert s.admin_api_key is not None and s.admin_api_key.get_secret_value() == "k"
-    assert s.storage.sessions_db == "other.sqlite3" and s.storage.audit_dir == "audit"
+    assert s.admin_api_key is not None
+    assert s.admin_api_key.get_secret_value() == "k"
+    assert s.storage.sessions_db == "other.sqlite3"
+    assert s.storage.audit_dir == "audit"
 
 
 def test_on_breach_must_cover_every_budget(settings: Settings) -> None:
@@ -36,15 +38,18 @@ def test_on_breach_must_cover_every_budget(settings: Settings) -> None:
 
 def test_wilson_reference_values() -> None:
     lo, hi = wilson_interval(0, 10)
-    assert lo == 0.0 and hi == pytest.approx(0.2775, abs=1e-4)
+    assert lo == 0.0
+    assert hi == pytest.approx(0.2775, abs=1e-4)
     lo, hi = wilson_interval(10, 10)
-    assert hi == pytest.approx(1.0) and lo == pytest.approx(0.7225, abs=1e-4)
+    assert hi == pytest.approx(1.0)
+    assert lo == pytest.approx(0.7225, abs=1e-4)
     assert wilson_interval(0, 0) == (0.0, 1.0)
 
 
 def test_quantiles_and_bootstrap() -> None:
     values = [1.0, 2.0, 3.0, 4.0]
-    assert median(values) == 2.5 and quantile(values, 1.0) == 4.0
+    assert median(values) == 2.5
+    assert quantile(values, 1.0) == 4.0
     with pytest.raises(ValueError):
         quantile([], 0.5)
     ci1 = bootstrap_ci(values, median, n_resamples=200, seed=1)

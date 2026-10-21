@@ -25,7 +25,12 @@ def names(checks: list) -> set[str]:  # type: ignore[type-arg]
 
 def intent(**kw: object) -> OrderIntent:
     base: dict[str, object] = {
-        "venue": "binance", "symbol": "BTC-USDT-PERP", "side": "buy", "type": "market", "qty": 1.0, "price": None
+        "venue": "binance",
+        "symbol": "BTC-USDT-PERP",
+        "side": "buy",
+        "type": "market",
+        "qty": 1.0,
+        "price": None,
     }
     return OrderIntent(**(base | kw))  # type: ignore[arg-type]
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 
 from mcp_gateway.harness import Harness
 from mcp_gateway.settings import Settings, load_settings
@@ -23,6 +24,7 @@ def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[N
     monkeypatch.setenv("TRADEQ_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.chdir(tmp_path)
     yield
+    structlog.reset_defaults()
 
 
 @pytest.fixture

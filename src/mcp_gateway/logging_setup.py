@@ -10,6 +10,11 @@ import structlog
 QUIET_LOGGERS = ("httpx", "mcp", "uvicorn.access")
 
 
+def _stderr_logger(*_: object) -> structlog.PrintLogger:
+    """Resolve ``sys.stderr`` at call time, so a swapped stream (tests, CLI runners) is never written after close."""
+    return structlog.PrintLogger(file=sys.stderr)
+
+
 def configure_logging(level: str) -> None:
     numeric = logging.getLevelNamesMapping()[level]
     logging.basicConfig(stream=sys.stderr, level=numeric, format="%(message)s", force=True)
@@ -22,6 +27,6 @@ def configure_logging(level: str) -> None:
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(numeric),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=_stderr_logger,
         cache_logger_on_first_use=False,
     )

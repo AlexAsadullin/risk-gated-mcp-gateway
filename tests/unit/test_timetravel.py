@@ -16,7 +16,8 @@ def guard(start: str, end: str, policy: TimeTravelPolicy = TimeTravelPolicy.REFU
 
 def test_window_before_clock_passes() -> None:
     w = guard("2025-05-31", "2025-06-01T00:00:00Z")
-    assert not w.clamped and w.end == KNOWN
+    assert not w.clamped
+    assert w.end == KNOWN
 
 
 @pytest.mark.parametrize(
@@ -37,7 +38,8 @@ def test_refusals(start: str, end: str, code: RefusalCode) -> None:
 
 def test_clamp_policy() -> None:
     w = guard("2025-05-31", "2025-06-05", TimeTravelPolicy.CLAMP)
-    assert w.clamped and w.end == KNOWN
+    assert w.clamped
+    assert w.end == KNOWN
 
 
 def test_drop_future_rows_handles_types() -> None:
@@ -52,4 +54,5 @@ def test_drop_future_rows_handles_types() -> None:
         {"other": 1},
     ]
     kept, dropped = drop_future_rows(rows, k)
-    assert dropped == 2 and len(kept) == 5
+    assert dropped == 2
+    assert len(kept) == 5

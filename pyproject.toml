@@ -50,6 +50,11 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "W", "C4", "PT", "ASYNC"]
 
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on ValueError from parsers whose messages are not part of the API; small fixture files are read
+# synchronously inside async tests on purpose.
+"tests/**" = ["PT011", "ASYNC240"]
+
 [tool.mypy]
 python_version = "3.13"
 strict = true

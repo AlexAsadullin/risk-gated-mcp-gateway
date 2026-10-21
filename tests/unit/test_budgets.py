@@ -62,7 +62,8 @@ def test_order_breaches() -> None:
 def test_drawdown_breach_and_freeze_policy() -> None:
     assert bud.drawdown_breach(LIMITS, 100.0, 95.0) is None
     breach = bud.drawdown_breach(LIMITS, 100.0, 80.0)
-    assert breach is not None and breach.kind is BudgetKind.DRAWDOWN
+    assert breach is not None
+    assert breach.kind is BudgetKind.DRAWDOWN
     policy = dict.fromkeys(BudgetKind, BreachAction.REFUSE) | {BudgetKind.DRAWDOWN: BreachAction.FREEZE}
     assert bud.breach_freezes([breach], policy)
     rate = bud.Breach(kind=BudgetKind.ORDER_RATE, value=3, limit=2, message="x")
@@ -78,4 +79,5 @@ def test_remaining_never_negative() -> None:
 
 def test_budget_overrides_apply() -> None:
     merged = BudgetOverrides(max_tokens=5).apply(LIMITS)
-    assert merged.max_tokens == 5 and merged.capital == LIMITS.capital
+    assert merged.max_tokens == 5
+    assert merged.capital == LIMITS.capital
