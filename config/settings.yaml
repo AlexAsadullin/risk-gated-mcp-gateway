@@ -154,4 +154,5 @@ demo:
   report_seed: 20261021
   report_episodes: 200
   report_latency_calls: 300
+  report_latency_repeats: 3
   report_bootstrap: 2000

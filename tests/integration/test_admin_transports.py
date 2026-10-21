@@ -158,7 +158,9 @@ async def test_demo(settings: Settings) -> None:
 
 
 async def test_report_small(settings: Settings) -> None:
-    small = with_updates(settings, "demo", report_episodes=3, report_latency_calls=5, report_bootstrap=50)
+    small = with_updates(
+        settings, "demo", report_episodes=3, report_latency_calls=5, report_latency_repeats=2, report_bootstrap=50
+    )
     metrics = await run_report(small)
     by_arm = {(r["arm"], r["attack"]): r for r in metrics["attacks"]}
     for (arm, _), row in by_arm.items():

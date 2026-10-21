@@ -265,6 +265,7 @@ class DemoSettings(BaseModel):
     report_seed: int
     report_episodes: int = Field(gt=0)
     report_latency_calls: int = Field(gt=0)
+    report_latency_repeats: int = Field(gt=0)
     report_bootstrap: int = Field(gt=0)
 
 

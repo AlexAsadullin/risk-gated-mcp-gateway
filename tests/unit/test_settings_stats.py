@@ -57,3 +57,12 @@ def test_quantiles_and_bootstrap() -> None:
     assert 1.0 <= ci1[0] <= ci1[1] <= 4.0
     lo, hi = bootstrap_diff_ci([10.0, 11.0, 12.0], values, median, n_resamples=200, seed=2)
     assert 6.0 <= lo <= hi <= 11.0
+
+
+def test_fisher_exact_reference_values() -> None:
+    from mcp_gateway.bench.stats import fisher_exact_two_sided
+
+    # Fisher's tea-tasting table [[3, 1], [1, 3]]: two-sided p = 34/70.
+    assert fisher_exact_two_sided(3, 1, 1, 3) == pytest.approx(34 / 70)
+    assert fisher_exact_two_sided(5, 0, 0, 5) == pytest.approx(2 / 252)
+    assert fisher_exact_two_sided(1, 1, 1, 1) == pytest.approx(1.0)

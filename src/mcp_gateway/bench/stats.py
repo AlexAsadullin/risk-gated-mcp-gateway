@@ -72,3 +72,21 @@ def bootstrap_diff_ci(
         diffs.append(statistic(ra) - statistic(rb))
     alpha = (1 - level) / 2
     return (quantile(diffs, alpha), quantile(diffs, 1 - alpha))
+
+
+def fisher_exact_two_sided(a: int, b: int, c: int, d: int) -> float:
+    """Two-sided Fisher's exact test p-value for the 2x2 table [[a, b], [c, d]] (Fisher 1922).
+
+    Sums the hypergeometric probabilities of every table with the same margins that is no more likely than the
+    observed one; computed in exact integer arithmetic, so it stays valid for p-values far below 1e-300.
+    """
+    row1, col1, n = a + b, a + c, a + b + c + d
+    total = math.comb(n, col1)
+
+    def weight(x: int) -> int:
+        return math.comb(row1, x) * math.comb(n - row1, col1 - x)
+
+    observed = weight(a)
+    lo, hi = max(0, col1 - (n - row1)), min(row1, col1)
+    tail = sum(w for x in range(lo, hi + 1) if (w := weight(x)) <= observed)
+    return tail / total
