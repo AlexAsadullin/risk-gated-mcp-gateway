@@ -37,6 +37,7 @@ class DataResult(ToolOutput):
     n_rows: int = Field(description="Rows the store returned before truncation.")
     truncated: bool = Field(description="True if only the latest max rows are included.")
     dropped_future_rows: int = Field(description="Rows discarded because knowledge_time > known_at.")
+    leakage_flags: list[str] = Field(description="Kinds I2 flagged on this answer (X-Leakage-Flag), if any.")
     rows: list[dict[str, Any]]
 
 

@@ -15,6 +15,7 @@ from mcp_gateway.settings import TimeTravelPolicy
 from mcp_gateway.timeutil import parse_iso, to_iso, to_ns
 
 KNOWLEDGE_TIME_COLUMN = "knowledge_time"
+VALID_TIME_COLUMN = "valid_time"
 
 
 @dataclass(frozen=True)
@@ -100,3 +101,11 @@ def drop_future_rows(rows: list[dict[str, Any]], known_at_ns: int) -> tuple[list
             continue
         kept.append(row)
     return kept, dropped
+
+
+def sort_by_valid_time(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order rows by ``valid_time`` (ISO string or int ns); I2 orders by key columns, not by time.
+
+    Rows without a parseable valid time keep their relative order at the front (stable sort).
+    """
+    return sorted(rows, key=lambda row: _knowledge_ns(row.get(VALID_TIME_COLUMN)) or 0)

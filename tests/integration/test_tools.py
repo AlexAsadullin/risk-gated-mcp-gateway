@@ -81,7 +81,10 @@ async def test_research_flow(harness: Harness) -> None:
         assert not data.is_error
         assert data.data["n_rows"] == 60
         assert data.data["fingerprint"].startswith("sha256:")
-        assert max(r["knowledge_time"] for r in data.data["rows"]) <= 1748736000 * 10**9
+        rows = data.data["rows"]
+        assert max(parse_iso(r["knowledge_time"]) for r in rows) <= parse_iso("2025-06-01T00:00:00Z")
+        assert [r["valid_time"] for r in rows] == sorted(r["valid_time"] for r in rows)
+        assert data.data["leakage_flags"] == []
         big = await a.call("market_data", **window(harness, hours=24))
         assert big.data["truncated"]
         assert len(big.data["rows"]) == harness.settings.data.max_rows
@@ -117,7 +120,7 @@ async def test_research_flow(harness: Harness) -> None:
         )
         assert not bt.is_error
         assert bt.data["logged_to"] == "ledger"
-        assert bt.data["ledger_strategy_id"] == "ag/mom"
+        assert bt.data["ledger_strategy_id"] == "ag:mom"
         peek = await a.call(
             "run_backtest",
             strategy="mom",
@@ -131,6 +134,13 @@ async def test_research_flow(harness: Harness) -> None:
         assert (await a.call("place_order", **order(harness))).code == "mode_forbidden"
         assert (await a.call("positions")).code == "mode_forbidden"
         assert (await a.call("cancel_order", order_id="x")).code == "mode_forbidden"
+    events = harness.platform.ledger.leakage
+    assert [(e.source, e.severity, e.detail["tool"]) for e in events] == [
+        ("i9", "block", "market_data"),
+        ("i9", "block", "run_backtest"),
+    ]
+    assert events[0].strategy_id is None and events[1].strategy_id == "ag:mom"
+    assert events[0].detail["agent_id"] == "ag" and events[0].kind == "end_after_known_at"
     trials = harness.platform.ledger.trials
     assert len(trials) == 3
     assert trials[0].seed == 3
@@ -151,6 +161,9 @@ async def test_clamp_policy_and_future_rows_dropped(settings: Settings) -> None:
     assert out.data["clamped"]
     assert out.data["end"] == "2025-06-01T00:00:00Z"
     assert out.data["dropped_future_rows"] == 1
+    assert [(e.source, e.severity, e.kind) for e in h.platform.ledger.leakage] == [
+        ("i9", "warn", "end_clamped_to_known_at")
+    ]
     await h.gateway.downstream.aclose()
 
 
@@ -288,7 +301,7 @@ async def test_verdict_with_leakage_audit(harness: Harness) -> None:
     assert report["model_id"] == "leaky-llm"
     assert report["cells"][0]["entity"] == "BTC"
     assert harness.platform.ledger.leakage[0].source == "s7"
-    assert harness.platform.ledger.leakage[0].strategy_id == "ag/mom"
+    assert harness.platform.ledger.leakage[0].strategy_id == "ag:mom"
 
 
 async def test_downstream_outages(settings: Settings) -> None:

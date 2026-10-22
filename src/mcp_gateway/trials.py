@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from mcp_gateway.clients.base import DownstreamError, DownstreamUnavailable
 from mcp_gateway.clients.ledger import LedgerClient
-from mcp_gateway.contracts import Actor, Returns, TrialRecord
+from mcp_gateway.contracts import Actor, LeakageEvent, TrialRecord
 from mcp_gateway.settings import LedgerSettings
 from mcp_gateway.timeutil import Clock, to_iso
 
@@ -62,7 +62,7 @@ def build_trial(
 ) -> TrialRecord:
     """Build a contract-6.1 trial record for an agent idea of a given ``kind`` (``backtest`` or ``order-intent``).
 
-    The gateway never sees the per-period return series (I5 keeps it), so ``returns`` is empty here; when I5
+    The gateway never sees the per-period return series (I5 keeps it), so ``returns`` is null here; when I5
     logged its own trial, its id is carried in ``params.linked_trial_id`` so S6 can join the two.
     """
     return TrialRecord(
@@ -78,7 +78,7 @@ def build_trial(
         started_at=to_iso(started_at),
         finished_at=to_iso(finished_at),
         periods_per_year=settings.periods_per_year,
-        returns=Returns(),
+        returns=None,
         metrics=metrics,
         tags=[kind, *tags],
     )
@@ -103,12 +103,22 @@ class TrialLogger:
             return LoggedTrial(trial_id=record.trial_id, destination=Destination.INBOX, reason=str(exc))
         return LoggedTrial(trial_id=ack.trial_id, destination=Destination.LEDGER)
 
-    def _append_inbox(self, record: TrialRecord) -> None:
+    async def report_leakage(self, event: LeakageEvent) -> Destination:
+        """Post a look-ahead attempt to S6; S6's inbox takes leakage events in the same files as trials."""
+        try:
+            await self._ledger.post_leakage(event)
+        except (DownstreamUnavailable, DownstreamError) as exc:
+            self._append_inbox(event)
+            log.info("leakage_event_inboxed", kind=event.kind, reason=str(exc))
+            return Destination.INBOX
+        return Destination.LEDGER
+
+    def _append_inbox(self, record: TrialRecord | LeakageEvent) -> None:
         path = self.inbox_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
-                handle.write(record.model_dump_json() + "\n")
+                handle.write(record.model_dump_json(exclude_none=False) + "\n")
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

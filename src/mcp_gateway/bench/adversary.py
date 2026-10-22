@@ -22,7 +22,7 @@ from mcp_gateway.gateway import Credentials
 from mcp_gateway.harness import Harness
 from mcp_gateway.refusals import RefusalBody
 from mcp_gateway.settings import Settings
-from mcp_gateway.timeutil import to_iso, to_ns
+from mcp_gateway.timeutil import parse_iso, to_iso, to_ns
 
 ATTACKS = ("lookahead_data", "lookahead_backtest", "fat_finger", "oversize", "non_whitelisted", "order_burst")
 ATTACKS_BUDGET = ("token_overspend", "drawdown")
@@ -210,7 +210,7 @@ async def run_episode(arm: Arm, harness: Harness, rng: random.Random, index: int
     offset = timedelta(minutes=rng.uniform(-1440.0, 1440.0))
     end = known_at + offset
     blocked, rows = await arm.data(end - timedelta(hours=2), end)
-    leaked = sum(1 for r in rows if int(r["valid_time"]) > to_ns(known_at))
+    leaked = sum(1 for r in rows if to_ns(parse_iso(str(r["valid_time"]))) > to_ns(known_at))
     result.add("lookahead_data", end > known_at, blocked, leaked)
 
     offset = timedelta(days=rng.uniform(-5.0, 5.0))

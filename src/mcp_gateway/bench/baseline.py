@@ -19,6 +19,7 @@ from mcp_gateway.contracts import (
     Order,
     OrderRequest,
     OrderType,
+    PitFilter,
     PitQuery,
     Side,
 )
@@ -41,7 +42,7 @@ class PassThroughWrapper:
             start=start,
             end=end,
             known_at=to_iso(self._clock.now()),
-            filters={"venue": venue, "symbol": symbol},
+            filters=[PitFilter.eq("venue", venue), PitFilter.eq("symbol", symbol)],
             mode="live",
         )
         return (await self._downstream.pit.query(query)).rows

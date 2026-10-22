@@ -1,16 +1,16 @@
 """Downstream clients against respx mocks of contracts 6.1, 6.3, 6.4 and 6.5."""
 
-import io
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
-import pyarrow as pa
 import pytest
 import respx
+from pydantic import ValidationError
 
 from mcp_gateway.clients.base import DownstreamError, DownstreamUnavailable
-from mcp_gateway.clients.pit import PitLeakage, decode_rows
+from mcp_gateway.clients.pit import PitLeakage
 from mcp_gateway.contracts import (
     Actor,
     BacktestRequest,
@@ -18,7 +18,9 @@ from mcp_gateway.contracts import (
     LeakageEvent,
     Order,
     OrderRequest,
+    PitFilter,
     PitQuery,
+    PitTrainingSetRequest,
     ProbeRequest,
     TrialRecord,
 )
@@ -94,40 +96,69 @@ async def test_ledger_client(settings: Settings) -> None:
     await ds.aclose()
 
 
+def pit_answer(rows: list[dict[str, object]], **headers: str) -> httpx.Response:
+    body = {
+        "schema_version": "1",
+        "fingerprint": "sha256:ab",
+        "columns": ["valid_time", "price"],
+        "rows": rows,
+        "flags": [],
+    }
+    return httpx.Response(200, json=body, headers={"X-Dataset-Fingerprint": "sha256:ab", **headers})
+
+
 @respx.mock
-async def test_pit_client_json_arrow_and_conflict(settings: Settings) -> None:
+async def test_pit_client_matches_shipped_api(settings: Settings) -> None:
     ds = build_downstream(settings.services)
     url = f"{settings.services.pit.base_url}/v1/query"
+    row = {"valid_time": "2025-01-01T00:00:00Z", "price": 1.0}
     respx.post(url).mock(
         side_effect=[
-            httpx.Response(200, json={"rows": [{"a": 1}]}, headers={"X-Dataset-Fingerprint": "sha256:ab"}),
+            pit_answer([row]),
+            pit_answer([row], **{"X-Leakage-Flag": "end_after_known_at,no_knowledge_time"}),
             httpx.Response(409, json={"source": "i2", "kind": "end_after_known_at"}),
+            httpx.Response(200, json={"rows": [row]}),
         ]
     )
-    result = await ds.pit.query(QUERY)
-    assert result.rows == [{"a": 1}]
-    assert result.fingerprint == "sha256:ab"
-    assert respx.calls[0].request.url.params["format"] == "json"
+    query = QUERY.model_copy(update={"filters": [PitFilter.eq("symbol", "X"), PitFilter.isin("venue", ["a", "b"])]})
+    result = await ds.pit.query(query)
+    assert result.rows == [row] and result.fingerprint == "sha256:ab" and result.leakage_flags == []
+    sent = json.loads(respx.calls[0].request.content)
+    assert sent["format"] == "json" and not respx.calls[0].request.url.params
+    assert sent["filters"] == [
+        {"column": "symbol", "op": "==", "value": "X"},
+        {"column": "venue", "op": "in", "value": ["a", "b"]},
+    ]
+    assert "strategy_id" not in sent
+    flagged = await ds.pit.query(QUERY)
+    assert flagged.leakage_flags == ["end_after_known_at", "no_knowledge_time"]
     with pytest.raises(PitLeakage) as info:
         await ds.pit.query(QUERY)
     assert info.value.event["kind"] == "end_after_known_at"
-
-    sink = io.BytesIO()
-    table = pa.table({"price": [1.0, 2.0]})
-    with pa.ipc.new_stream(sink, table.schema) as writer:
-        writer.write_table(table)
-    respx.post(url).respond(
-        200, content=sink.getvalue(), headers={"content-type": "application/vnd.apache.arrow.stream"}
-    )
-    assert (await ds.pit.query(QUERY)).rows == [{"price": 1.0}, {"price": 2.0}]
+    with pytest.raises(ValidationError):
+        await ds.pit.query(QUERY)
     await ds.aclose()
 
 
-def test_decode_rows_shapes() -> None:
-    assert decode_rows("application/json", b"", [{"a": 1}]) == [{"a": 1}]
-    assert decode_rows("application/json", b"", {"columns": ["a", "b"], "data": [[1, 2]]}) == [{"a": 1, "b": 2}]
-    with pytest.raises(ValueError):
-        decode_rows("application/json", b"", {"weird": True})
+@respx.mock
+async def test_pit_training_set(settings: Settings) -> None:
+    ds = build_downstream(settings.services)
+    route = respx.post(f"{settings.services.pit.base_url}/v1/features/training-set").mock(
+        return_value=pit_answer([{"ts": "2025-01-01T00:00:00Z", "symbol": "X", "close": 2.0}])
+    )
+    request = PitTrainingSetRequest(
+        names=["close"],
+        known_at="2025-01-02T00:00:00Z",
+        mode="research",
+        entities=[{"symbol": "X"}],
+        start="2025-01-01T00:00:00Z",
+        end="2025-01-01T01:00:00Z",
+        step_seconds=3600,
+    )
+    result = await ds.pit.training_set(request)
+    assert result.rows[0]["close"] == 2.0
+    assert json.loads(route.calls[0].request.content)["step_seconds"] == 3600
+    await ds.aclose()
 
 
 @respx.mock
@@ -231,6 +262,7 @@ def test_strategy_id_mapping() -> None:
     ).strategy_id_template
     assert ledger_strategy_id(template, "a", "mom") == "a/mom"
     assert ledger_strategy_id(template, "a", "a/mom") == "a/mom"
+    assert ledger_strategy_id("{agent_id}:{strategy}", "a", "mom") == "a:mom"
 
 
 def test_contract_roundtrip_keeps_extras() -> None:

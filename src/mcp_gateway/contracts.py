@@ -82,7 +82,7 @@ class Verdict(WireModel):
 
 
 class LeakageEvent(WireModel):
-    source: Literal["i2", "s7"]
+    source: Literal["i2", "s7", "i9"]
     strategy_id: str | None = None
     trial_id: str | None = None
     severity: Severity
@@ -94,21 +94,72 @@ class LeakageEvent(WireModel):
 # --- 6.3 Point-in-time Store (I2) ---------------------------------------------------------------------------
 
 
+FilterScalar = str | int | float | bool
+FilterOp = Literal["==", "!=", "<", "<=", ">", ">=", "in"]
+
+
+class PitFilter(BaseModel):
+    """A typed I2 predicate on one column; ``in`` takes a list, every other operator a scalar."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    column: str
+    op: FilterOp
+    value: FilterScalar | list[FilterScalar]
+
+    @classmethod
+    def eq(cls, column: str, value: FilterScalar) -> PitFilter:
+        return cls(column=column, op="==", value=value)
+
+    @classmethod
+    def isin(cls, column: str, values: list[FilterScalar]) -> PitFilter:
+        return cls(column=column, op="in", value=values)
+
+
 class PitQuery(WireModel):
+    """Body of I2 ``POST /v1/query``. ``format``, ``strategy_id`` and ``trial_id`` are I2's optional fields."""
+
     dataset: str
     start: str
     end: str
     known_at: str
     columns: list[str] | None = None
-    filters: dict[str, Any] | None = None
+    filters: list[PitFilter] | None = None
     mode: Literal["research", "live"]
+    format: Literal["json"] = "json"
+    strategy_id: str | None = None
+    trial_id: str | None = None
+
+
+class PitTrainingSetRequest(WireModel):
+    """Body of I2 ``POST /v1/features/training-set`` with a grid spine (entities x [start, end] every step)."""
+
+    names: list[str]
+    known_at: str
+    mode: Literal["research", "live"]
+    entities: list[dict[str, str]]
+    start: str
+    end: str
+    step_seconds: int
+    format: Literal["json"] = "json"
+    strategy_id: str | None = None
+
+
+class PitResponse(WireModel):
+    """JSON answer of I2; timestamp columns (valid_time, knowledge_time, ts_*) are ISO-8601 strings."""
+
+    fingerprint: str
+    columns: list[str]
+    rows: list[dict[str, Any]]
+    flags: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PitResult(BaseModel):
-    """Decoded ``/v1/query`` answer (Arrow IPC or JSON) plus the reproducibility fingerprint."""
+    """Decoded I2 answer plus the fingerprint and any leakage flags (``X-Leakage-Flag``)."""
 
     rows: list[dict[str, Any]]
     fingerprint: str | None
+    leakage_flags: list[str] = Field(default_factory=list)
 
 
 # --- 6.4 Order API (I6 / I7) --------------------------------------------------------------------------------

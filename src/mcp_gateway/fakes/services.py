@@ -29,7 +29,9 @@ from mcp_gateway.contracts import (
     LeakageReport,
     Order,
     OrderRequest,
+    PitFilter,
     PitQuery,
+    PitTrainingSetRequest,
     Position,
     ProbeRequest,
     SymbolForecast,
@@ -39,7 +41,7 @@ from mcp_gateway.contracts import (
 )
 from mcp_gateway.fakes.world import SyntheticWorld
 from mcp_gateway.settings import FakeSettings
-from mcp_gateway.timeutil import Clock, parse_iso, to_iso, to_ns
+from mcp_gateway.timeutil import NS_PER_SECOND, Clock, ns_to_iso, parse_iso, to_iso, to_ns
 
 FEATURE_LAG_BARS = 60
 
@@ -60,7 +62,48 @@ class DownTransport(httpx.AsyncBaseTransport):
 # --------------------------------------------------------------------------------------------- I2
 
 
+def _filter_value(filters: list[PitFilter], column: str) -> Any:
+    return next((f.value for f in filters if f.column == column), None)
+
+
+def _leak_event(dataset: str, end: str, known_at: str) -> JSONResponse:
+    event = LeakageEvent(
+        source="i2",
+        severity="block",
+        kind="end_after_known_at",
+        detail={"dataset": dataset, "end": end, "known_at": known_at},
+        observed_at=known_at,
+    )
+    return JSONResponse(status_code=409, content=event.model_dump(mode="json"))
+
+
+def _answer(request_json: str, columns: list[str], rows: list[dict[str, Any]]) -> JSONResponse:
+    """I2's JSON answer: ``{schema_version, fingerprint, columns, rows, flags}`` plus the fingerprint header."""
+    fingerprint = "sha256:" + hashlib.sha256(request_json.encode()).hexdigest()
+    body = {"schema_version": "1", "fingerprint": fingerprint, "columns": columns, "rows": rows, "flags": []}
+    return JSONResponse(content=body, headers={"X-Dataset-Fingerprint": fingerprint})
+
+
+TAPE_COLUMNS = [
+    "valid_time",
+    "venue",
+    "symbol",
+    "trade_id",
+    "knowledge_time",
+    "ts_exchange",
+    "ts_local",
+    "price",
+    "size",
+    "side",
+]
+
+
 def build_fake_pit(world: SyntheticWorld, received: list[PitQuery], *, leak_future_rows: bool = False) -> FastAPI:
+    """Fake of I2's shipped API: tape queries and grid training sets, JSON with ISO-8601 timestamps.
+
+    Like the real store it orders tape rows by key columns (here ``trade_id``, which is not time order), so the
+    gateway's own sort by valid time is exercised.
+    """
     app = FastAPI()
 
     @app.post("/v1/query")
@@ -69,45 +112,66 @@ def build_fake_pit(world: SyntheticWorld, received: list[PitQuery], *, leak_futu
         start_ns, end_ns = to_ns(parse_iso(body.start)), to_ns(parse_iso(body.end))
         known_ns = to_ns(parse_iso(body.known_at))
         if body.mode == "research" and end_ns > known_ns:
-            event = LeakageEvent(
-                source="i2",
-                severity="block",
-                kind="end_after_known_at",
-                detail={"dataset": body.dataset, "end": body.end, "known_at": body.known_at},
-                observed_at=body.known_at,
-            )
-            return JSONResponse(status_code=409, content=event.model_dump(mode="json"))
-        filters = body.filters or {}
-        if body.dataset.startswith("tape."):
-            symbols = [str(filters.get("symbol", ""))]
-        else:
-            raw = filters.get("symbol", [])
-            symbols = [str(s) for s in (raw if isinstance(raw, list) else [raw])]
+            return _leak_event(body.dataset, body.end, body.known_at)
+        filters = body.filters or []
+        symbol = str(_filter_value(filters, "symbol"))
+        venue = _filter_value(filters, "venue")
         rows: list[dict[str, Any]] = []
-        for symbol in symbols:
-            if symbol not in world.base_prices:
-                continue
+        if symbol in world.base_prices:
             for i in world.bars(start_ns, end_ns):
                 if world.knowledge_ns(i) > known_ns and not leak_future_rows:
                     continue
-                rows.append(_row(world, body, symbol, i))
-        fingerprint = "sha256:" + hashlib.sha256(body.model_dump_json().encode()).hexdigest()
-        return JSONResponse(content={"rows": rows}, headers={"X-Dataset-Fingerprint": fingerprint})
+                rows.append(_tape_row(world, venue, symbol, i))
+        rows.sort(key=lambda r: str(r["trade_id"]))
+        return _answer(body.model_dump_json(), TAPE_COLUMNS, rows)
+
+    @app.post("/v1/features/training-set")
+    async def training_set(body: PitTrainingSetRequest) -> JSONResponse:
+        start_ns, end_ns = to_ns(parse_iso(body.start)), to_ns(parse_iso(body.end))
+        known_ns = to_ns(parse_iso(body.known_at))
+        if body.mode == "research" and end_ns > known_ns:
+            return _leak_event("features", body.end, body.known_at)
+        step = body.step_seconds * NS_PER_SECOND
+        rows: list[dict[str, Any]] = []
+        for entity in body.entities:
+            symbol = next(iter(entity.values()))
+            for ts in range(start_ns, end_ns + 1, step):
+                index = world.bar_index(ts)
+                row: dict[str, Any] = {"ts": ns_to_iso(ts), **entity}
+                for name in body.names:
+                    row[name] = _feature(world, symbol, index, name) if symbol in world.base_prices else None
+                rows.append(row)
+        return _answer(
+            body.model_dump_json(), ["ts", *sorted({k for e in body.entities for k in e}), *body.names], rows
+        )
 
     return app
 
 
-def _row(world: SyntheticWorld, body: PitQuery, symbol: str, i: int) -> dict[str, Any]:
-    price = world.price_at_index(symbol, i)
-    base = {"symbol": symbol, "valid_time": world.valid_ns(i), "knowledge_time": world.knowledge_ns(i)}
-    if body.dataset.startswith("tape."):
-        side = "buy" if _stable_unit(world.seed, symbol, i, "side") < 0.5 else "sell"
-        size = round(0.01 + _stable_unit(world.seed, symbol, i, "size"), 4)
-        return base | {"venue": (body.filters or {}).get("venue"), "price": price, "size": size, "side": side}
-    lagged = world.price_at_index(symbol, i - FEATURE_LAG_BARS)
-    values = {"ret_1h": price / lagged - 1.0, "price": price}
-    names = [c for c in (body.columns or []) if c not in base]
-    return base | {n: values.get(n, _stable_unit(world.seed, symbol, i, n)) for n in names}
+def _tape_row(world: SyntheticWorld, venue: Any, symbol: str, i: int) -> dict[str, Any]:
+    side = "buy" if _stable_unit(world.seed, symbol, i, "side") < 0.5 else "sell"
+    valid, known = ns_to_iso(world.valid_ns(i)), ns_to_iso(world.knowledge_ns(i))
+    return {
+        "valid_time": valid,
+        "venue": venue,
+        "symbol": symbol,
+        "trade_id": f"{_stable_unit(world.seed, symbol, i, 'id'):.12f}",
+        "knowledge_time": known,
+        "ts_exchange": valid,
+        "ts_local": known,
+        "price": world.price_at_index(symbol, i),
+        "size": round(0.01 + _stable_unit(world.seed, symbol, i, "size"), 4),
+        "side": side,
+    }
+
+
+def _feature(world: SyntheticWorld, symbol: str, index: int, name: str) -> float:
+    price = world.price_at_index(symbol, index)
+    if name == "close":
+        return price
+    if name == "ret_1h":
+        return price / world.price_at_index(symbol, index - FEATURE_LAG_BARS) - 1.0
+    return _stable_unit(world.seed, symbol, index, name)
 
 
 # --------------------------------------------------------------------------------------------- S1, I5

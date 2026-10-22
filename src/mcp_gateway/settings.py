@@ -114,12 +114,12 @@ class TimeTravelPolicy(StrEnum):
 
 class DataSettings(BaseModel):
     market_data_dataset_template: str
-    features_dataset: str
+    feature_entity_column: str
+    feature_step_seconds: int = Field(gt=0)
     channels: list[str]
     max_rows: int = Field(gt=0)
     max_window_days: float = Field(gt=0)
     time_travel_policy: TimeTravelPolicy
-    feature_key_columns: list[str]
 
 
 class ForecastSettings(BaseModel):

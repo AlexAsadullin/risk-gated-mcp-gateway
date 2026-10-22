@@ -42,7 +42,8 @@ ledger:
   inbox_relpath: research-ledger/inbox
   family_prefix: risk-gated-mcp-gateway
   # How agent-facing strategy names map to ledger strategy ids, so two agents never share a strategy.
-  strategy_id_template: "{agent_id}/{strategy}"
+  # No '/': S6 serves GET /v1/strategies/{strategy_id}/verdict, which cannot match an id containing a slash.
+  strategy_id_template: "{agent_id}:{strategy}"
   periods_per_year: 8760.0
 
 clock:
@@ -56,12 +57,13 @@ modes:
 
 data:
   market_data_dataset_template: "tape.{channel}"
-  features_dataset: features
+  # Features come from I2's feature store on a grid spine: one row per symbol every step.
+  feature_entity_column: symbol
+  feature_step_seconds: 3600
   channels: [trades, book_delta, book_snapshot, funding, liquidations, open_interest]
   max_rows: 500
   max_window_days: 366
   time_travel_policy: refuse
-  feature_key_columns: [symbol, valid_time, knowledge_time]
 
 forecast:
   quantiles: [0.1, 0.5, 0.9]

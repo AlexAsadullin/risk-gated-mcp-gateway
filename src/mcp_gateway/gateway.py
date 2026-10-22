@@ -36,9 +36,13 @@ from mcp_gateway.contracts import (
     Order,
     OrderRequest,
     OrderType,
+    PitFilter,
     PitQuery,
+    PitResult,
+    PitTrainingSetRequest,
     Position,
     ProbeRequest,
+    Severity,
     Side,
 )
 from mcp_gateway.downstream import Downstream
@@ -77,16 +81,30 @@ from mcp_gateway.sessions import (
     keys_equal,
 )
 from mcp_gateway.settings import BreachAction, Mode, Settings, UnknownModelPolicy
-from mcp_gateway.timetravel import Window, drop_future_rows, guard_window
+from mcp_gateway.timetravel import Window, drop_future_rows, guard_window, sort_by_valid_time
 from mcp_gateway.timeutil import Clock, from_ns, parse_iso, to_iso, to_ns
 from mcp_gateway.trials import Destination, LoggedTrial, TrialLogger, build_trial, ledger_strategy_id
 
 log = structlog.get_logger(__name__)
 
 HTTP_NOT_FOUND = 404
+LEAKAGE_SOURCE: Literal["i9"] = "i9"  # contract 6.1 extension accepted by S6
+LOOKAHEAD_KIND = "end_after_known_at"
+LOOKAHEAD_CLAMPED_KIND = "end_clamped_to_known_at"
+FEATURES_DATASET = "features.training_set"
 ADMIN_ACTOR = "admin"
 LeakageStatus = Literal["not_required", "clean", "flagged", "not_audited"]
 ToolOutcome = BaseModel
+
+
+@dataclass(frozen=True)
+class Fetched:
+    """Rows from I2 after the gateway's own future-row filter, ordered by valid time."""
+
+    rows: list[dict[str, Any]]
+    fingerprint: str | None
+    dropped: int
+    flags: list[str]
 
 
 @dataclass(frozen=True)
@@ -359,14 +377,39 @@ class Gateway:
             raise Refusal(RefusalCode.INVALID_REQUEST, "strategy id must not be empty")
         return ledger_strategy_id(self.settings.ledger.strategy_id_template, session.agent_id, strategy)
 
-    def _guard(self, session: Session, start: str, end: str) -> Window:
-        return guard_window(
-            start,
-            end,
-            known_at=self.known_at(session),
-            policy=self.settings.data.time_travel_policy,
-            max_window_days=self.settings.data.max_window_days,
+    async def _guard(
+        self, session: Session, start: str, end: str, *, tool: str, strategy_id: str | None = None
+    ) -> Window:
+        """Check a window against the session clock; report every look-ahead attempt to S6 (source ``i9``)."""
+        try:
+            window = guard_window(
+                start,
+                end,
+                known_at=self.known_at(session),
+                policy=self.settings.data.time_travel_policy,
+                max_window_days=self.settings.data.max_window_days,
+            )
+        except Refusal as refusal:
+            if refusal.code is RefusalCode.TIME_TRAVEL:
+                await self._report_lookahead(session, tool, strategy_id, "block", refusal.details)
+            raise
+        if window.clamped:
+            details = {"requested_start": start, "requested_end": end, "known_at": to_iso(window.end)}
+            await self._report_lookahead(session, tool, strategy_id, "warn", details)
+        return window
+
+    async def _report_lookahead(
+        self, session: Session, tool: str, strategy_id: str | None, severity: Severity, details: dict[str, Any]
+    ) -> None:
+        event = LeakageEvent(
+            source=LEAKAGE_SOURCE,
+            strategy_id=strategy_id,
+            severity=severity,
+            kind=LOOKAHEAD_KIND if severity == "block" else LOOKAHEAD_CLAMPED_KIND,
+            detail={"tool": tool, "agent_id": session.agent_id, "session_id": session.session_id, **details},
+            observed_at=to_iso(self.clock.now()),
         )
+        await self.trials.report_leakage(event)
 
     async def _query(
         self,
@@ -375,9 +418,9 @@ class Gateway:
         dataset: str,
         window: Window,
         columns: list[str] | None,
-        filters: dict[str, Any],
+        filters: list[PitFilter],
         touch: bool = True,
-    ) -> tuple[list[dict[str, Any]], str | None, int]:
+    ) -> Fetched:
         known_at = self.known_at(session)
         query = PitQuery(
             dataset=dataset,
@@ -388,18 +431,21 @@ class Gateway:
             filters=filters,
             mode=self._pit_mode(session),
         )
+        return await self._fetch(session, self.downstream.pit.query(query), window, touch=touch)
+
+    async def _fetch(self, session: Session, call: Awaitable[PitResult], window: Window, *, touch: bool) -> Fetched:
         try:
-            result = await self.downstream.pit.query(query)
+            result = await call
         except PitLeakage as exc:
             raise Refusal(
                 RefusalCode.TIME_TRAVEL,
                 "the point-in-time store refused the query as a leak",
                 details={"enforced_by": "i2", "leakage_event": exc.event},
             ) from exc
-        rows, dropped = drop_future_rows(result.rows, to_ns(known_at))
+        rows, dropped = drop_future_rows(result.rows, to_ns(self.known_at(session)))
         if touch:
             session.usage.touch_window(to_ns(window.start), to_ns(window.end))
-        return rows, result.fingerprint, dropped
+        return Fetched(sort_by_valid_time(rows), result.fingerprint, dropped, result.leakage_flags)
 
     def _truncate(self, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
         limit = self.settings.data.max_rows
@@ -492,64 +538,61 @@ class Gateway:
                     f"unknown channel {channel!r}",
                     details={"channels": self.settings.data.channels},
                 )
-            window = self._guard(session, start, end)
+            window = await self._guard(session, start, end, tool="market_data")
             dataset = self.settings.data.market_data_dataset_template.format(channel=channel)
-            rows, fingerprint, dropped = await self._query(
+            fetched = await self._query(
                 session,
                 dataset=dataset,
                 window=window,
                 columns=None,
-                filters={"venue": venue, "symbol": symbol},
+                filters=[PitFilter.eq("venue", venue), PitFilter.eq("symbol", symbol)],
             )
             session.usage.touch_symbols([symbol])
-            kept, truncated = self._truncate(rows)
             return MarketDataResult(
-                dataset=dataset,
-                venue=venue,
-                symbol=symbol,
-                channel=channel,
-                start=to_iso(window.start),
-                end=to_iso(window.end),
-                known_at=to_iso(self.known_at(session)),
-                clamped=window.clamped,
-                fingerprint=fingerprint,
-                n_rows=len(rows),
-                truncated=truncated,
-                dropped_future_rows=dropped,
-                rows=kept,
+                venue=venue, symbol=symbol, channel=channel, **self._data_fields(session, dataset, window, fetched)
             )
 
         return await self.invoke("market_data", credentials, args, impl)
+
+    def _data_fields(self, session: Session, dataset: str, window: Window, fetched: Fetched) -> dict[str, Any]:
+        kept, truncated = self._truncate(fetched.rows)
+        return {
+            "dataset": dataset,
+            "start": to_iso(window.start),
+            "end": to_iso(window.end),
+            "known_at": to_iso(self.known_at(session)),
+            "clamped": window.clamped,
+            "fingerprint": fetched.fingerprint,
+            "n_rows": len(fetched.rows),
+            "truncated": truncated,
+            "dropped_future_rows": fetched.dropped,
+            "leakage_flags": fetched.flags,
+            "rows": kept,
+        }
 
     async def features(
         self, credentials: Credentials, *, names: list[str], symbols: list[str], start: str, end: str
     ) -> BaseModel | RefusalBody:
         args = {"names": names, "symbols": symbols, "start": start, "end": end}
+        cfg = self.settings.data
 
         async def impl(session: Session) -> FeaturesResult:
             if not names or not symbols:
                 raise Refusal(RefusalCode.INVALID_REQUEST, "names and symbols must be non-empty")
-            window = self._guard(session, start, end)
-            dataset = self.settings.data.features_dataset
-            columns = [*self.settings.data.feature_key_columns, *names]
-            rows, fingerprint, dropped = await self._query(
-                session, dataset=dataset, window=window, columns=columns, filters={"symbol": symbols}
-            )
-            session.usage.touch_symbols(symbols)
-            kept, truncated = self._truncate(rows)
-            return FeaturesResult(
-                dataset=dataset,
+            window = await self._guard(session, start, end, tool="features")
+            request = PitTrainingSetRequest(
                 names=names,
-                symbols=symbols,
+                known_at=to_iso(self.known_at(session)),
+                mode=self._pit_mode(session),
+                entities=[{cfg.feature_entity_column: symbol} for symbol in symbols],
                 start=to_iso(window.start),
                 end=to_iso(window.end),
-                known_at=to_iso(self.known_at(session)),
-                clamped=window.clamped,
-                fingerprint=fingerprint,
-                n_rows=len(rows),
-                truncated=truncated,
-                dropped_future_rows=dropped,
-                rows=kept,
+                step_seconds=cfg.feature_step_seconds,
+            )
+            fetched = await self._fetch(session, self.downstream.pit.training_set(request), window, touch=True)
+            session.usage.touch_symbols(symbols)
+            return FeaturesResult(
+                names=names, symbols=symbols, **self._data_fields(session, FEATURES_DATASET, window, fetched)
             )
 
         return await self.invoke("features", credentials, args, impl)
@@ -616,7 +659,9 @@ class Gateway:
             session.usage.add_strategy(strategy_id)
             try:
                 with refusing_downstream():
-                    response = await self._backtest(session, strategy, params, universe, start, end, fidelity)
+                    response = await self._backtest(
+                        session, strategy, params, universe, start, end, fidelity, strategy_id=strategy_id
+                    )
             except Refusal as refusal:
                 await self._log_trial(
                     session,
@@ -671,6 +716,8 @@ class Gateway:
         start: str,
         end: str,
         fidelity: Fidelity,
+        *,
+        strategy_id: str,
     ) -> BacktestResponse:
         if fidelity not in self.settings.backtest.fidelities:
             raise Refusal(
@@ -683,7 +730,7 @@ class Gateway:
                 RefusalCode.INVALID_REQUEST,
                 f"universe must hold 1..{self.settings.backtest.max_universe} symbols",
             )
-        window = self._guard(session, start, end)
+        window = await self._guard(session, start, end, tool="run_backtest", strategy_id=strategy_id)
         session.usage.touch_symbols(universe)
         session.usage.touch_window(to_ns(window.start), to_ns(window.end))
         return await self.downstream.backtest.run(
@@ -896,18 +943,18 @@ class Gateway:
         window = Window(start=known_at - timedelta(seconds=ref.lookback_s), end=known_at, clamped=False)
         dataset = self.settings.data.market_data_dataset_template.format(channel=ref.channel)
         try:
-            rows, _, _ = await self._query(
+            fetched = await self._query(
                 session,
                 dataset=dataset,
                 window=window,
                 columns=None,
-                filters={"venue": intent.venue, "symbol": intent.symbol},
+                filters=[PitFilter.eq("venue", intent.venue), PitFilter.eq("symbol", intent.symbol)],
                 touch=False,
             )
         except (DownstreamUnavailable, DownstreamError) as exc:
             log.info("reference_price_unavailable", symbol=intent.symbol, error=str(exc))
             return None
-        prices = [row[ref.price_column] for row in rows if isinstance(row.get(ref.price_column), int | float)]
+        prices = [row[ref.price_column] for row in fetched.rows if isinstance(row.get(ref.price_column), int | float)]
         return float(prices[-1]) if prices else None
 
     async def _check_drawdown(self, session: Session, client: OrderClient) -> None:
