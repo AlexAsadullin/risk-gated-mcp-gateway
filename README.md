@@ -16,6 +16,7 @@ cp .env.example .env   # set TRADEQ_DATA_DIR and GATEWAY_ADMIN_API_KEY
 make lint typecheck test
 make reproduce      # offline demo against in-process fakes; prints the audit log
 make report         # experiments behind docs/report.md (about 80 s)
+make test-integration  # opt-in: real I2 and S6 from the sibling repos' .venv (scratch data under tmp/)
 make serve          # admin API + MCP over streamable HTTP on 127.0.0.1:8608
 ```
 
@@ -44,7 +45,7 @@ nested delimiter `__`, e.g. `GATEWAY_RISK__PRICE_BAND_BPS=150`. Secrets come onl
 | `budgets` | default per-agent limits; `on_breach` (refuse or freeze) per budget; tools allowed while frozen |
 | `risk` | instrument whitelist, max order and position notional, fat-finger band in basis points |
 | `modes` | `live_enabled` (off by default) and the S6/S7 conditions for live orders |
-| `data` | I2 dataset names, row cap, `time_travel_policy` (refuse or clamp) |
+| `data` | I2 tape dataset template, row cap, `time_travel_policy` (refuse or clamp), feature spine entity and step |
 | `pricing` | USD per million tokens per model, used by `report_usage` |
 
 ## Architecture
@@ -72,6 +73,20 @@ with `isError: true` and a structured body `{refused: true, code, message, detai
 Consumed: 6.1 (S6 trials, verdicts, leakage events, inbox fallback), 6.3 (I2 queries, 409 leakage guard),
 6.4 (I6 and I7 order API), 6.5 (S1 forecast, I5 backtests, S7 probe).
 
+Checked against the shipped services (`make test-integration`, which passed on 2026-10-23):
+
+- I2: the gateway sends `POST /v1/query` with `"format": "json"` in the body and typed filters
+  (`[{"column": "symbol", "op": "==", "value": ...}]`), and reads `{fingerprint, columns, rows, flags}` with
+  ISO-8601 timestamps, `X-Dataset-Fingerprint` and `X-Leakage-Flag` (returned to the agent as `leakage_flags`).
+  I2 orders rows by key columns, so the gateway sorts them by `valid_time` before truncating to the latest rows.
+  The `features` tool uses `POST /v1/features/training-set` with a grid spine (`data.feature_entity_column`,
+  `data.feature_step_seconds`).
+- S6: trial records validate against `research_ledger/sdk/wire.py` (`returns: null`, `source: "i9"`). Each
+  look-ahead attempt the gateway blocks itself is posted as a `LeakageEvent` with `source: "i9"`, severity
+  `block` (`warn` when the clamp policy cut the window), with the S6 inbox as fallback; I2's own 409s are
+  reported to S6 by I2. Ledger strategy ids are `<agent_id>:<strategy>`: S6's verdict route cannot match an
+  id that contains `/`.
+
 Extensions (optional fields only):
 
 | Where | Extension |
@@ -79,9 +94,8 @@ Extensions (optional fields only):
 | `POST /admin/v1/sessions` | request: optional `account_id`; response: `api_key` (shown once, stored as SHA-256), `mcp_path`, limits, usage |
 | admin API | extra routes: `GET /sessions`, `GET /sessions/{id}`, `POST /sessions/{id}/unfreeze`, `POST /sessions/{id}/close`, `GET /sessions/{id}/audit` |
 | MCP auth | `Authorization: Bearer <session api_key>`, or admin key plus `X-Gateway-Session` |
-| `TrialRecord` from I9 | `source="i9"`, empty `returns`; `params.linked_trial_id` and tag `linked:i5:<id>` point at I5's own trial; refused attempts are logged with tag `refused:<code>` |
+| `TrialRecord` from I9 | `source="i9"`, `returns: null`; `params.linked_trial_id` and tag `linked:i5:<id>` point at I5's own trial; refused attempts are logged with tag `refused:<code>` |
 | `verdict` tool | adds the S7 leakage reports, `leakage_status` and `promotable` to the S6 verdict |
-| I2 queries | `format=json` as a query parameter; filters `{"venue", "symbol"}` for tape and `{"symbol": [...]}` for features |
 
 ## Key results
 
@@ -92,18 +106,16 @@ From `make report` (synthetic fakes, laptop; details and method in [docs/report.
 | Violations blocked, guarded gateway | 1,225 / 1,225, 100% (99.7 to 100) |
 | False refusals on benign controls | 0 / 2,686, 0% (0 to 0.14) |
 | Violations blocked, pass-through baseline | 0 / 1,225, 0% (0 to 0.3) |
-| MCP overhead per `market_data` call, stdio | 3.01 ms (2.96 to 3.06) |
-| MCP overhead per `market_data` call, streamable HTTP | 4.05 ms (3.96 to 4.14) |
-| Guard cost per `place_order`, vs pass-through | 4.36 ms (4.32 to 4.40) |
+| MCP overhead per `market_data` call, stdio | 1.85 ms (1.84 to 1.86) |
+| MCP overhead per `market_data` call, streamable HTTP | 2.38 ms (2.37 to 2.40) |
+| Guard cost per `place_order`, vs pass-through | 3.28 ms (3.26 to 3.31) |
 
 ## Limitations and roadmap
 
-All downstream services are fakes in v0.1; real I2, I5, S6, S7, I6 and I7 have not been exercised. I7 does not
-exist yet, so live routing is tested against a second fake with the Order API. The I2 query JSON shape and filter
-format are assumptions until I2 publishes them; the client accepts row lists, `{"rows": ...}`, columnar JSON and
-Arrow IPC. Contract 6.1 `LeakageEvent.source` has no `i9` value, so look-ahead attempts that the gateway blocks
-itself stay in the gateway audit log instead of S6. Session state is SQLite with per-process locks; two gateway
+Only I2 and S6 have been exercised as real services (opt-in test); I5, S1, S7 and I6 are fakes, and the report
+experiments use the fakes throughout. I7 does not exist yet, so live routing is tested against a second fake with
+the Order API. Session state is SQLite with per-process locks; two gateway
 processes serving the same session can interleave updates.
 
-Roadmap: propose `i9` as a `LeakageEvent` source; cache S6/S7 gate results per strategy; an approval step
+Roadmap: run the integration test against I5, S7 and I6 once they ship; cache S6/S7 gate results per strategy; an approval step
 (stage, approve, execute) for agent orders as I7 specifies; per-agent budgets that persist across sessions.
