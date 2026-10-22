@@ -139,8 +139,10 @@ async def test_research_flow(harness: Harness) -> None:
         ("i9", "block", "market_data"),
         ("i9", "block", "run_backtest"),
     ]
-    assert events[0].strategy_id is None and events[1].strategy_id == "ag:mom"
-    assert events[0].detail["agent_id"] == "ag" and events[0].kind == "end_after_known_at"
+    assert events[0].strategy_id is None
+    assert events[1].strategy_id == "ag:mom"
+    assert events[0].detail["agent_id"] == "ag"
+    assert events[0].kind == "end_after_known_at"
     trials = harness.platform.ledger.trials
     assert len(trials) == 3
     assert trials[0].seed == 3

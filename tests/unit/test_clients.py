@@ -122,9 +122,12 @@ async def test_pit_client_matches_shipped_api(settings: Settings) -> None:
     )
     query = QUERY.model_copy(update={"filters": [PitFilter.eq("symbol", "X"), PitFilter.isin("venue", ["a", "b"])]})
     result = await ds.pit.query(query)
-    assert result.rows == [row] and result.fingerprint == "sha256:ab" and result.leakage_flags == []
+    assert result.rows == [row]
+    assert result.fingerprint == "sha256:ab"
+    assert result.leakage_flags == []
     sent = json.loads(respx.calls[0].request.content)
-    assert sent["format"] == "json" and not respx.calls[0].request.url.params
+    assert sent["format"] == "json"
+    assert not respx.calls[0].request.url.params
     assert sent["filters"] == [
         {"column": "symbol", "op": "==", "value": "X"},
         {"column": "venue", "op": "in", "value": ["a", "b"]},
