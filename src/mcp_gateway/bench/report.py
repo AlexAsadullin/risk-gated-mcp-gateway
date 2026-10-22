@@ -201,7 +201,7 @@ def markdown_tables(metrics: dict[str, Any]) -> str:
     for r in metrics["fisher"]:
         lines.append(
             f"| {r['attack']} | {r['guarded'][0]} / {r['guarded'][1]} | {r['baseline'][0]} / "
-            f"{r['baseline'][1]} | {r['p_value']:.3g} |"
+            f"{r['baseline'][1]} | {_fmt_p(r['p_value'])} |"
         )
     lines.append(f"\nSessions frozen by budget breaches (guarded arm): {metrics['frozen_sessions']['guarded']}")
     return "\n".join(lines) + "\n"
