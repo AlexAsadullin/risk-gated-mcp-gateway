@@ -4,7 +4,7 @@ export
 
 UV ?= uv
 
-.PHONY: setup lint format typecheck test cov reproduce report serve stdio clean
+.PHONY: setup lint format typecheck test test-integration reproduce report serve stdio clean
 
 setup:
 	$(UV) venv --python 3.13 .venv
@@ -23,6 +23,10 @@ typecheck:
 
 test:
 	$(UV) run pytest --cov --cov-report=term
+
+# Opt-in: starts the real I2 and S6 from the sibling repositories' .venv (needs make setup there).
+test-integration:
+	$(UV) run pytest -m integration -p no:cacheprovider tests/real
 
 reproduce:
 	$(UV) run gateway reproduce

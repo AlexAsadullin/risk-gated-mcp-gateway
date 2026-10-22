@@ -58,8 +58,10 @@ class Harness:
         down: set[str] | None = None,
         leak_future_rows: bool = False,
         overrides: dict[str, httpx.AsyncBaseTransport] | None = None,
+        real_services: set[str] | None = None,
     ) -> Harness:
-        """Wire the gateway to fresh fakes. ``down`` simulates outages; ``overrides`` swaps single services."""
+        """Wire the gateway to fresh fakes. ``down`` simulates outages; ``overrides`` swaps single services;
+        ``real_services`` names services reached over HTTP at their configured ``base_url`` instead."""
         settings = settings.model_copy(update={"admin_api_key": SecretStr(admin_key)})
         clock = ManualClock(parse_iso(settings.demo.wall_clock))
         platform = FakePlatform(
@@ -70,6 +72,8 @@ class Harness:
             leak_future_rows=leak_future_rows,
         )
         transports = platform.transports() | dict(overrides or {})
+        for name in real_services or ():
+            transports.pop(name)
         gateway = build_gateway(settings, clock=clock, transports=transports)
         return cls(settings, clock, platform, gateway, build_http_app(gateway, owns_gateway=False), admin_key)
 
