@@ -120,9 +120,9 @@ From `make report` (synthetic fakes, laptop; details and method in [docs/report.
 | Violations blocked, guarded gateway | 1,225 / 1,225, 100% (99.7 to 100) |
 | False refusals on benign controls | 0 / 2,686, 0% (0 to 0.14) |
 | Violations blocked, pass-through baseline | 0 / 1,225, 0% (0 to 0.3) |
-| MCP overhead per `market_data` call, stdio | 1.85 ms (1.84 to 1.86) |
-| MCP overhead per `market_data` call, streamable HTTP | 2.38 ms (2.37 to 2.40) |
-| Guard cost per `place_order`, vs pass-through | 3.28 ms (3.26 to 3.31) |
+| MCP overhead per `market_data` call, stdio | 2.58 ms (2.47 to 2.71) |
+| MCP overhead per `market_data` call, streamable HTTP | 3.33 ms (3.20 to 3.49) |
+| Guard cost per `place_order`, vs pass-through | 4.04 ms (4.00 to 4.09) |
 
 ## Limitations and roadmap
 
