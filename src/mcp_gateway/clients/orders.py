@@ -6,8 +6,12 @@ from typing import Any
 from urllib.parse import quote
 
 from mcp_gateway.clients.base import ServiceClient
-from mcp_gateway.contracts import Account, Order, OrderRequest, Position
+from mcp_gateway.contracts import AS_OF_HEADER, Account, Order, OrderRequest, Position
 from mcp_gateway.settings import ServiceEndpoint
+
+
+def _as_of(known_at: str | None) -> dict[str, str] | None:
+    return None if known_at is None else {AS_OF_HEADER: known_at}
 
 
 def _items(payload: Any, key: str) -> list[Any]:
@@ -23,8 +27,11 @@ class OrderClient(ServiceClient):
         super().__init__(endpoint, **kwargs)
         self.service = service
 
-    async def place(self, request: OrderRequest) -> Order:
-        response = await self.request("POST", "/v1/orders", json=request.model_dump(mode="json"))
+    async def place(self, request: OrderRequest, *, known_at: str | None = None) -> Order:
+        """Submit an order; ``known_at`` (the session clock) travels in the ``X-Tradeq-Known-At`` header."""
+        response = await self.request(
+            "POST", "/v1/orders", json=request.model_dump(mode="json"), headers=_as_of(known_at)
+        )
         return Order.model_validate(response.json())
 
     async def get(self, order_id: str) -> Order:
@@ -35,10 +42,12 @@ class OrderClient(ServiceClient):
         response = await self.request("DELETE", f"/v1/orders/{quote(order_id, safe='')}")
         return Order.model_validate(response.json())
 
-    async def account(self, account_id: str) -> Account:
-        response = await self.request("GET", f"/v1/accounts/{quote(account_id, safe='')}")
+    async def account(self, account_id: str, *, known_at: str | None = None) -> Account:
+        response = await self.request("GET", f"/v1/accounts/{quote(account_id, safe='')}", headers=_as_of(known_at))
         return Account.model_validate(response.json())
 
-    async def positions(self, account_id: str) -> list[Position]:
-        response = await self.request("GET", "/v1/positions", params={"account_id": account_id})
+    async def positions(self, account_id: str, *, known_at: str | None = None) -> list[Position]:
+        response = await self.request(
+            "GET", "/v1/positions", params={"account_id": account_id}, headers=_as_of(known_at)
+        )
         return [Position.model_validate(item) for item in _items(response.json(), "positions")]

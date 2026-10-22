@@ -38,6 +38,14 @@ class SyntheticWorld:
     def price(self, symbol: str, at: datetime) -> float:
         return self.price_at_index(symbol, self.bar_index(to_ns(at)))
 
+    def last_known_price(self, symbol: str, at: datetime) -> float:
+        """Price of the latest bar whose knowledge time is at or before ``at``: what I2 would serve as known."""
+        at_ns = to_ns(at)
+        index = self.bar_index(at_ns)
+        while self.knowledge_ns(index) > at_ns:
+            index -= 1
+        return self.price_at_index(symbol, index)
+
     def bars(self, start_ns: int, end_ns: int) -> range:
         """Bar indices whose valid time lies in ``[start, end]``."""
         step = self.bar_seconds * NS_PER_SECOND

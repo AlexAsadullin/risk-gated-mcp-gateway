@@ -59,10 +59,7 @@ class ArmResult:
 
 def reference_price(world: SyntheticWorld, symbol: str, now: datetime) -> float:
     """The last trade price knowable at ``now``: the same rule the gateway applies through I2."""
-    index = world.bar_index(to_ns(now) - world.knowledge_delay_s * 1_000_000_000)
-    while world.knowledge_ns(index) > to_ns(now):
-        index -= 1
-    return world.price_at_index(symbol, index)
+    return world.last_known_price(symbol, now)
 
 
 class Arm(Protocol):

@@ -471,7 +471,11 @@ class Gateway:
         )
 
     def _remaining(self, session: Session) -> dict[str, float]:
-        return bud.remaining(session.limits, session.usage, to_ns(self.clock.now()))
+        return bud.remaining(session.limits, session.usage, to_ns(self.known_at(session)))
+
+    def _as_of(self, session: Session) -> str | None:
+        """The session clock for I6/I7 when the operator drives one; ``None`` means the service's own clock."""
+        return None if session.known_at_ns is None else to_iso(self.known_at(session))
 
     def _breach_refusal(self, breaches: list[bud.Breach], **details: Any) -> Refusal:
         freezes = bud.breach_freezes(breaches, self.settings.budgets.on_breach)
@@ -880,7 +884,7 @@ class Gateway:
             await self._live_gate(session, strategy_id)
         client, routed_to = self._order_client(session)
         reference = await self._reference_price(session, intent)
-        positions = await client.positions(session.account_id)
+        positions = await client.positions(session.account_id, known_at=self._as_of(session))
         await self._check_drawdown(session, client)
         checks = pre_trade_checks(intent, reference_price=reference, positions=positions, risk=self.settings.risk)
         if failed(checks):
@@ -889,7 +893,8 @@ class Gateway:
                 "pre-trade checks failed: " + ", ".join(c.name for c in failed(checks)),
                 details={"checks": [c.model_dump(mode="json") for c in checks]},
             )
-        now_ns = to_ns(self.clock.now())
+        # The rate window runs on the session clock: a replayed episode spans session time, not wall time.
+        now_ns = to_ns(self.known_at(session))
         notional = order_notional(intent, reference) or 0.0
         breaches = bud.order_breaches(
             session.limits,
@@ -913,7 +918,7 @@ class Gateway:
             strategy_id=strategy_id,
             actor=Actor(kind="agent", id=session.agent_id),
         )
-        order = await client.place(request)
+        order = await client.place(request, known_at=self._as_of(session))
         usage = session.usage
         usage.order_times_ns = [*bud.prune_order_times(usage.order_times_ns, now_ns, session.limits.order_window_s)]
         usage.order_times_ns.append(now_ns)
@@ -958,7 +963,7 @@ class Gateway:
         return float(prices[-1]) if prices else None
 
     async def _check_drawdown(self, session: Session, client: OrderClient) -> None:
-        account = await client.account(session.account_id)
+        account = await client.account(session.account_id, known_at=self._as_of(session))
         self._update_equity(session, account.equity if account.equity is not None else account.balance)
         usage = session.usage
         if usage.peak_equity is None or usage.last_equity is None:
@@ -990,7 +995,7 @@ class Gateway:
         async def impl(session: Session) -> PositionsResult:
             self._require_trading(session)
             client, _ = self._order_client(session)
-            positions: list[Position] = await client.positions(session.account_id)
+            positions: list[Position] = await client.positions(session.account_id, known_at=self._as_of(session))
             return PositionsResult(account_id=session.account_id, positions=positions)
 
         return await self.invoke("positions", credentials, {}, impl)
@@ -1000,7 +1005,7 @@ class Gateway:
             self._require_trading(session)
             client, _ = self._order_client(session)
             await self._check_drawdown(session, client)
-            account = await client.account(session.account_id)
+            account = await client.account(session.account_id, known_at=self._as_of(session))
             usage = session.usage
             dd = (
                 bud.drawdown(usage.peak_equity, usage.last_equity)

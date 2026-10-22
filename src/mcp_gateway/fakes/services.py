@@ -12,13 +12,15 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from mcp_gateway.contracts import (
+    AS_OF_HEADER,
     Account,
     BacktestRequest,
     BacktestResponse,
@@ -291,11 +293,19 @@ class ExchangeState:
 
 
 def build_fake_exchange(world: SyntheticWorld, state: ExchangeState, cfg: FakeSettings, clock: Clock) -> FastAPI:
-    """Shadow exchange fake: market orders fill at the synthetic price now; limit orders rest unless marketable."""
+    """Shadow exchange fake: market orders fill at the last price known at the order's session clock.
+
+    The clock comes from the ``X-Tradeq-Known-At`` header when the gateway sends one (sessions with an operator
+    clock, e.g. replayed episodes), else from the fake's own clock. Limit orders rest unless marketable.
+    """
     app = FastAPI()
 
-    def mark(symbol: str) -> float:
-        return world.price(symbol, clock.now()) * state.mark_shock.get(symbol, 1.0)
+    def as_of(request: Request) -> datetime:
+        header = request.headers.get(AS_OF_HEADER)
+        return parse_iso(header) if header else clock.now()
+
+    def mark(symbol: str, at: datetime) -> float:
+        return world.last_known_price(symbol, at) * state.mark_shock.get(symbol, 1.0)
 
     def fill(req: OrderRequest, px: float) -> None:
         key = (req.account_id, req.venue, req.symbol)
@@ -308,13 +318,14 @@ def build_fake_exchange(world: SyntheticWorld, state: ExchangeState, cfg: FakeSe
         state.cash[req.account_id] = state.cash.get(req.account_id, cfg.initial_cash) - signed * px
 
     @app.post("/v1/orders")
-    async def place(body: OrderRequest) -> Order:
+    async def place(body: OrderRequest, request: Request) -> Order:
         state.received.append(body)
+        at = as_of(request)
         order_id = f"ord-{len(state.received):05d}"
         if body.symbol not in world.base_prices:
             order = Order(order_id=order_id, status="rejected", reject_reason="unknown symbol")
         else:
-            px = mark(body.symbol)
+            px = mark(body.symbol, at)
             marketable = body.type == "market" or (
                 body.price is not None and ((body.side == "buy") == (body.price >= px))
             )
@@ -349,11 +360,11 @@ def build_fake_exchange(world: SyntheticWorld, state: ExchangeState, cfg: FakeSe
             record["status"] = "cancelled"
         return Order.model_validate(record)
 
-    def positions_of(account_id: str) -> list[Position]:
+    def positions_of(account_id: str, at: datetime) -> list[Position]:
         out = []
         for (acct, venue, symbol), qty in state.positions.items():
             if acct == account_id and qty != 0:
-                px = mark(symbol)
+                px = mark(symbol, at)
                 key = (acct, venue, symbol)
                 out.append(
                     Position(
@@ -368,13 +379,14 @@ def build_fake_exchange(world: SyntheticWorld, state: ExchangeState, cfg: FakeSe
         return out
 
     @app.get("/v1/positions")
-    async def positions(account_id: str) -> dict[str, Any]:
-        return {"schema_version": "1", "positions": [p.model_dump(mode="json") for p in positions_of(account_id)]}
+    async def positions(account_id: str, request: Request) -> dict[str, Any]:
+        held = positions_of(account_id, as_of(request))
+        return {"schema_version": "1", "positions": [p.model_dump(mode="json") for p in held]}
 
     @app.get("/v1/accounts/{account_id}")
-    async def account(account_id: str) -> Account:
+    async def account(account_id: str, request: Request) -> Account:
         cash = state.cash.get(account_id, cfg.initial_cash)
-        equity = cash + sum(p.qty * (p.mark_price or 0.0) for p in positions_of(account_id))
+        equity = cash + sum(p.qty * (p.mark_price or 0.0) for p in positions_of(account_id, as_of(request)))
         return Account(account_id=account_id, equity=equity, balance=cash, currency=cfg.currency)
 
     return app

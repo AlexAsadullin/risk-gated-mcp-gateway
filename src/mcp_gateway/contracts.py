@@ -11,6 +11,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 SCHEMA_VERSION: Literal["1"] = "1"
+# Optional extension of contract 6.4: the session clock of the order, as an ISO-8601 header. A header (not a body
+# field) because I6's OrderRequest forbids extra fields; services that ignore it simply mark at their own clock.
+AS_OF_HEADER = "X-Tradeq-Known-At"
 
 ActorKind = Literal["human", "agent", "robot"]
 Side = Literal["buy", "sell"]

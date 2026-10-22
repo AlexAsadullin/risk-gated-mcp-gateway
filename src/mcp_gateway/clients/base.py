@@ -58,6 +58,7 @@ class ServiceClient:
         *,
         json: Any = None,
         params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         ok_statuses: tuple[int, ...] = (),
     ) -> httpx.Response:
         """Send a request; raise :class:`DownstreamUnavailable` or :class:`DownstreamError` on failure.
@@ -65,7 +66,7 @@ class ServiceClient:
         Statuses in ``ok_statuses`` are returned to the caller instead of raising (e.g. I2's 409).
         """
         try:
-            response = await self._client.request(method, path, json=json, params=params)
+            response = await self._client.request(method, path, json=json, params=params, headers=headers)
         except httpx.HTTPError as exc:
             log.warning("downstream_unreachable", service=self.service, path=path, error=str(exc))
             raise DownstreamUnavailable(self.service, type(exc).__name__) from exc

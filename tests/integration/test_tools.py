@@ -409,3 +409,37 @@ async def test_agent_connection_is_reusable(harness: Harness) -> None:
         assert isinstance(a, AgentConnection)
         replies = [await a.call("clock") for _ in range(3)]
     assert all(not r.is_error for r in replies)
+
+
+async def test_order_rate_window_runs_on_session_clock(harness: Harness) -> None:
+    """A replayed paper episode moves the session clock, not the wall clock; the rate window must follow it."""
+    known = harness.settings.demo.known_at
+    s = await harness.create_session(agent_id="ag", mode="paper", known_at=known, budgets={"max_orders_per_window": 2})
+    async with harness.agent(s["api_key"]) as a:
+        assert not (await a.call("place_order", **order(harness))).is_error
+        assert not (await a.call("place_order", **order(harness, side="sell"))).is_error
+        third = await a.call("place_order", **order(harness))
+        assert third.code == "budget_breached"
+        assert third.data["details"]["breaches"][0]["kind"] == "order_rate"
+        moved = await harness.set_clock(s["session_id"], to_iso(parse_iso(known) + timedelta(seconds=61)))
+        assert moved.status_code == 200
+        assert not (await a.call("place_order", **order(harness))).is_error
+        remaining = (await a.call("budget")).data["remaining"]["orders_in_window"]
+    assert remaining == 1.0
+
+
+async def test_paper_fills_at_session_clock_price(harness: Harness) -> None:
+    known = parse_iso(harness.settings.demo.known_at)
+    world = harness.platform.world
+    symbol = harness.settings.demo.symbol
+    s = await harness.create_session(agent_id="ag", mode="paper", known_at=to_iso(known))
+    async with harness.agent(s["api_key"]) as a:
+        first = await a.call("place_order", **order(harness))
+        await harness.set_clock(s["session_id"], to_iso(known + timedelta(hours=1)))
+        second = await a.call("place_order", **order(harness, side="sell"))
+    for reply, at in ((first, known), (second, known + timedelta(hours=1))):
+        fill = reply.data["order"]["price"]
+        assert fill == pytest.approx(reply.data["reference_price"])
+        assert fill == pytest.approx(world.last_known_price(symbol, at))
+    assert first.data["order"]["price"] != pytest.approx(world.last_known_price(symbol, harness.clock.now()))
+    assert first.data["order"]["price"] != pytest.approx(second.data["order"]["price"])
