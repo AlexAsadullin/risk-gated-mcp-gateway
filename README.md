@@ -18,6 +18,7 @@ make reproduce      # offline demo against in-process fakes; prints the audit lo
 make report         # experiments behind docs/report.md (about 80 s)
 make test-integration  # opt-in: real I2 and S6 from the sibling repos' .venv (scratch data under tmp/)
 make serve          # admin API + MCP over streamable HTTP on 127.0.0.1:8608
+make serve-offline  # the same server wired to the in-process fakes (gateway serve --offline)
 ```
 
 Connect an agent over HTTP:
@@ -46,7 +47,19 @@ nested delimiter `__`, e.g. `GATEWAY_RISK__PRICE_BAND_BPS=150`. Secrets come onl
 | `risk` | instrument whitelist, max order and position notional, fat-finger band in basis points |
 | `modes` | `live_enabled` (off by default) and the S6/S7 conditions for live orders |
 | `data` | I2 tape dataset template, row cap, `time_travel_policy` (refuse or clamp), feature spine entity and step |
-| `pricing` | USD per million tokens per model, used by `report_usage` |
+| `pricing` | USD per million tokens per model, used by `report_usage` (see below) |
+
+Prices are Anthropic first-party API rates as checked on 2026-10-23: Claude Opus 5.5 $4 / $20, Claude Sonnet 5.5
+$2 / $10, Claude Haiku 5.5 $0.10 / $0.50 (prompts up to 100K tokens; $0.50 / $2.50 beyond, which the flat table
+does not model), Claude Sonnet 4.6 $3 / $15, Claude Haiku 4.5 $1 / $5 (input / output per million tokens).
+`claude-sonnet-4-5` was removed because its current rate could not be verified from the source used. Models that
+are not listed are priced at the `default` row ($4 / $20, the Opus 5.5 rate), which is an assumption, or refused
+with `unknown_model_policy: refuse`. `scripted-llm` is the deterministic test double, not a real model.
+
+In paper and live sessions that have an operator clock (`known_at`), budgets and the order-rate window run on that
+session clock, and the gateway sends it to I6/I7 in an `X-Tradeq-Known-At` header (an optional extension of
+contract 6.4; a header because I6's `OrderRequest` forbids extra fields). The fake I6 fills at the last price
+known at that time, which is the price the gateway's reference-price check reads from I2.
 
 ## Architecture
 
@@ -94,6 +107,7 @@ Extensions (optional fields only):
 | `POST /admin/v1/sessions` | request: optional `account_id`; response: `api_key` (shown once, stored as SHA-256), `mcp_path`, limits, usage |
 | admin API | extra routes: `GET /sessions`, `GET /sessions/{id}`, `POST /sessions/{id}/unfreeze`, `POST /sessions/{id}/close`, `GET /sessions/{id}/audit` |
 | MCP auth | `Authorization: Bearer <session api_key>`, or admin key plus `X-Gateway-Session` |
+| Order API (6.4) | `X-Tradeq-Known-At` request header on orders, positions and accounts when the session has an operator clock |
 | `TrialRecord` from I9 | `source="i9"`, `returns: null`; `params.linked_trial_id` and tag `linked:i5:<id>` point at I5's own trial; refused attempts are logged with tag `refused:<code>` |
 | `verdict` tool | adds the S7 leakage reports, `leakage_status` and `promotable` to the S6 verdict |
 

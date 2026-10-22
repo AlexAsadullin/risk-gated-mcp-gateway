@@ -251,7 +251,7 @@ def build_mcp_server(gateway: Gateway, credentials: CredentialSource) -> MCPServ
         tokens_in: Annotated[int, Field(description="Prompt tokens.", ge=0)],
         tokens_out: Annotated[int, Field(description="Completion tokens.", ge=0)],
         latency_ms: Annotated[float, Field(description="Decision latency, milliseconds.", ge=0)],
-        model: Annotated[str, Field(description="Model id, e.g. claude-sonnet-4-5.")],
+        model: Annotated[str, Field(description="Model id, e.g. claude-sonnet-5-5.")],
     ) -> Annotated[CallToolResult, UsageResult]:
         outcome = await gateway.report_usage(
             credentials(ctx), tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency_ms, model=model

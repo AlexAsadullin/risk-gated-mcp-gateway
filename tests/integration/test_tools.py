@@ -261,7 +261,7 @@ async def test_usage_budgets_and_pricing(harness: Harness) -> None:
         ok = await a.call("report_usage", tokens_in=500_000, tokens_out=0, latency_ms=10.0, model="claude-haiku-4-5")
         assert ok.data["cost_usd"] == pytest.approx(0.5)
         unknown = await a.call("report_usage", tokens_in=500_000, tokens_out=0, latency_ms=1.0, model="other")
-        assert unknown.data["cost_usd"] == pytest.approx(1.5)
+        assert unknown.data["cost_usd"] == pytest.approx(2.0)
         slow = await a.call("report_usage", tokens_in=1, tokens_out=1, latency_ms=500.0, model="other")
         assert slow.code == "budget_breached"
         assert slow.data["details"]["breaches"][0]["kind"] == "latency"

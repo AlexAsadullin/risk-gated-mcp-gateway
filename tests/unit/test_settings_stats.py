@@ -66,3 +66,14 @@ def test_fisher_exact_reference_values() -> None:
     assert fisher_exact_two_sided(3, 1, 1, 3) == pytest.approx(34 / 70)
     assert fisher_exact_two_sided(5, 0, 0, 5) == pytest.approx(2 / 252)
     assert fisher_exact_two_sided(1, 1, 1, 1) == pytest.approx(1.0)
+
+
+def test_price_table_matches_published_rates(settings: Settings) -> None:
+    """Anthropic first-party rates (USD per million tokens) checked on 2026-10-23; see README."""
+    prices = {m: (p.input_per_mtok_usd, p.output_per_mtok_usd) for m, p in settings.pricing.models.items()}
+    assert prices["claude-opus-5-5"] == (4.0, 20.0)
+    assert prices["claude-sonnet-5-5"] == (2.0, 10.0)
+    assert prices["claude-haiku-5-5"] == (0.10, 0.50)
+    assert prices["claude-sonnet-4-6"] == (3.0, 15.0)
+    assert prices["claude-haiku-4-5"] == (1.0, 5.0)
+    assert "claude-sonnet-4-5" not in prices

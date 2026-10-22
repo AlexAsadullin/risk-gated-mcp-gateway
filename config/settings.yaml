@@ -104,11 +104,17 @@ budgets:
   frozen_allowed_tools: [clock, budget, positions, account, verdict]
 
 pricing:
-  default: { input_per_mtok_usd: 3.0, output_per_mtok_usd: 15.0 }
+  # USD per million tokens, Anthropic first-party API rates as checked on 2026-10-23 (see README, Configuration).
+  # Claude Haiku 5.5 is priced for prompts up to 100K tokens ($0.50 / $2.50 beyond); the table has no tiers.
+  # The default row prices models that are not listed; it is an assumption, not a published rate.
+  default: { input_per_mtok_usd: 4.0, output_per_mtok_usd: 20.0 }
   models:
-    claude-opus-5-5: { input_per_mtok_usd: 15.0, output_per_mtok_usd: 75.0 }
-    claude-sonnet-4-5: { input_per_mtok_usd: 3.0, output_per_mtok_usd: 15.0 }
+    claude-opus-5-5: { input_per_mtok_usd: 4.0, output_per_mtok_usd: 20.0 }
+    claude-sonnet-5-5: { input_per_mtok_usd: 2.0, output_per_mtok_usd: 10.0 }
+    claude-haiku-5-5: { input_per_mtok_usd: 0.10, output_per_mtok_usd: 0.50 }
+    claude-sonnet-4-6: { input_per_mtok_usd: 3.0, output_per_mtok_usd: 15.0 }
     claude-haiku-4-5: { input_per_mtok_usd: 1.0, output_per_mtok_usd: 5.0 }
+    # Not a real model: the deterministic test double that S8 and the tests drive.
     scripted-llm: { input_per_mtok_usd: 1.0, output_per_mtok_usd: 2.0 }
   unknown_model_policy: default
 
@@ -152,7 +158,7 @@ demo:
   symbol: BTC-USDT-PERP
   known_at: "2025-06-01T00:00:00Z"
   wall_clock: "2025-06-15T12:00:00Z"
-  model: claude-sonnet-4-5
+  model: claude-sonnet-5-5
   report_seed: 20261021
   report_episodes: 200
   report_latency_calls: 300
