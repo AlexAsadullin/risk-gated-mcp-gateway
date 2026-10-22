@@ -15,38 +15,45 @@ from mcp_gateway.bench.report import run_report
 from mcp_gateway.demo import audit_line, run_demo
 from mcp_gateway.fakes.services import FakePlatform
 from mcp_gateway.fakes.world import world_from_settings
+from mcp_gateway.gateway import Gateway
 from mcp_gateway.logging_setup import configure_logging
 from mcp_gateway.mcp_server import build_mcp_server, fixed_credentials
-from mcp_gateway.settings import Mode, load_settings
+from mcp_gateway.settings import Mode, Settings, load_settings
 from mcp_gateway.timeutil import ManualClock, parse_iso
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
 
+OFFLINE_HELP = "Use the in-process fakes of all downstream services and the offline wall clock (demo.wall_clock)."
+
+
+def _gateway(settings: Settings, offline: bool) -> Gateway:
+    """The real gateway; with ``offline`` it is wired to the fakes, exactly as tests and the demo wire it."""
+    if not offline:
+        return build_gateway(settings)
+    clock = ManualClock(parse_iso(settings.demo.wall_clock))
+    platform = FakePlatform(world=world_from_settings(settings.fakes), cfg=settings.fakes, clock=clock)
+    return build_gateway(settings, clock=clock, transports=platform.transports())
+
+
 @app.command()
-def serve() -> None:
+def serve(offline: Annotated[bool, typer.Option(help=OFFLINE_HELP)] = False) -> None:
     """Serve the admin API and MCP over streamable HTTP on server.host:server.port."""
     settings = load_settings()
-    http = build_http_app(build_gateway(settings))
+    http = build_http_app(_gateway(settings, offline))
     configure_logging(settings.server.log_level)
     uvicorn.run(http.app, host=settings.server.host, port=settings.server.port, log_config=None)
 
 
 @app.command()
 def stdio(
-    offline: Annotated[bool, typer.Option(help="Use the in-process fakes instead of real services.")] = False,
+    offline: Annotated[bool, typer.Option(help=OFFLINE_HELP)] = False,
 ) -> None:
     """Serve MCP over stdio for the session whose key is in GATEWAY_AGENT_API_KEY."""
     settings = load_settings()
     if settings.agent_api_key is None:
         raise typer.BadParameter("set GATEWAY_AGENT_API_KEY to the session's API key")
-    if offline:
-        clock = ManualClock(parse_iso(settings.demo.wall_clock))
-        platform = FakePlatform(world=world_from_settings(settings.fakes), cfg=settings.fakes, clock=clock)
-        gateway = build_gateway(settings, clock=clock, transports=platform.transports())
-    else:
-        gateway = build_gateway(settings)
-    server = build_mcp_server(gateway, fixed_credentials(settings.agent_api_key.get_secret_value()))
+    server = build_mcp_server(_gateway(settings, offline), fixed_credentials(settings.agent_api_key.get_secret_value()))
     configure_logging(settings.server.log_level)
     asyncio.run(server.run_stdio_async())
 

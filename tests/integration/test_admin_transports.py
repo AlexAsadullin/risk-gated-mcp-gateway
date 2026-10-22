@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import socket
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -184,3 +188,66 @@ def test_cli_session_create_and_reproduce(monkeypatch: pytest.MonkeyPatch) -> No
     assert "hash chain intact: True" in out.output
     out = runner.invoke(cli_app, ["stdio"])
     assert out.exit_code != 0
+
+
+def test_serve_offline_subprocess(tmp_path: Path) -> None:
+    """`gateway serve --offline` serves admin + MCP over HTTP against the fakes, with no launcher of its own."""
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "TRADEQ_DATA_DIR": str(tmp_path / "data"),
+        "GATEWAY_ADMIN_API_KEY": ADMIN_KEY,
+        "GATEWAY_SERVER__PORT": str(port),
+    }
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "mcp_gateway", "serve", "--offline"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(200):
+            try:
+                if httpx.get(base + "/healthz", timeout=0.5).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                time.sleep(0.05)
+        admin = {"authorization": f"Bearer {ADMIN_KEY}"}
+        created = httpx.post(
+            base + "/admin/v1/sessions",
+            headers=admin,
+            json={"agent_id": "off", "mode": "paper", "known_at": "2025-06-01T00:00:00Z"},
+        )
+        assert created.status_code == 201
+        key = created.json()["api_key"]
+
+        async def call() -> dict[str, object]:
+            async with (
+                httpx2.AsyncClient(headers={"authorization": f"Bearer {key}"}) as http_client,
+                Client(streamable_http_client(base + "/mcp", http_client=http_client)) as client,
+            ):
+                return decode(
+                    await client.call_tool(
+                        "place_order",
+                        {
+                            "venue": "binance",
+                            "symbol": "BTC-USDT-PERP",
+                            "side": "buy",
+                            "type": "market",
+                            "qty": 0.01,
+                            "strategy_id": "s",
+                            "rationale": "offline serve",
+                        },
+                    )
+                ).data
+
+        data = asyncio.run(call())
+        assert data["routed_to"] == "i6"
+        assert data["order"]["price"] == pytest.approx(data["reference_price"])
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

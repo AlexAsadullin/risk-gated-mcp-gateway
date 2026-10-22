@@ -4,7 +4,7 @@ export
 
 UV ?= uv
 
-.PHONY: setup lint format typecheck test test-integration reproduce report serve stdio clean
+.PHONY: setup lint format typecheck test test-integration reproduce report serve serve-offline stdio clean
 
 setup:
 	$(UV) venv --python 3.13 .venv
@@ -36,6 +36,9 @@ report:
 
 serve:
 	$(UV) run gateway serve
+
+serve-offline:
+	$(UV) run gateway serve --offline
 
 stdio:
 	$(UV) run gateway stdio
