@@ -46,17 +46,44 @@ downstream services, which the demo, the tests and the report use.
 
 ## State at handover
 
-1. The repo is finished and green. Lint and `mypy --strict` are clean, 69 tests pass in about 11 s, and coverage is 98%. The tree is clean, with 9 commits.
-2. `make reproduce` runs a scripted agent session: a time-travel refusal, a logged backtest, a paper order at the fake I6, a fat-finger reject, and a budget breach that freezes the session. `make report` takes about 80 s.
-3. docs/report.md is committed, and the orchestrator checked it against the writing rules.
-4. Headline results (synthetic): the gateway blocked all 1225 violations by adversarial agents, with 0 false refusals in 2686 valid calls. A pass-through baseline in the style of laukikk/alpaca-mcp blocked none and returned 11620 future rows. Fisher's exact test gives p below 8.35e-38 for every attack class. Transport overhead per call is 3.01 ms for stdio and 4.05 ms for streamable HTTP, and the guards add 1.03 ms per data call and 4.36 ms per order.
-5. Contract extensions, all optional: `account_id` on session creation, which returns a one-time `api_key` and `mcp_path`; admin routes to list, get, unfreeze and close sessions and to read the audit log; MCP auth through `Authorization: Bearer <api_key>`, or the admin key plus `X-Gateway-Session`; and `leakage_status` and `promotable` on the verdict tool.
+Last task (2026-10-23): align with the shipped I2 and S6.
+
+1. The repo is green: lint and `mypy --strict` are clean, and 69 default tests pass in about 10 s with 97% coverage.
+   One opt-in test (`make test-integration`, marker `integration`) is deselected by default. It passed when run on
+   2026-10-23, taking 3 s. It starts `point-in-time-store/.venv/bin/pit serve` and
+   `research-ledger/.venv/bin/ledger serve` on free ports. Its scratch `TRADEQ_DATA_DIR` is
+   `tmp/integration-<id>/data` (gitignored, removed on success). It seeds I2 with a contract-6.2 tape file through
+   `pit ingest tape.trades` and runs a research session (data, a look-ahead refusal, a logged backtest, a refused
+   peeking backtest, a verdict) and a paper session (the reference price from real I2, an order to the fake I6).
+   It asserts that S6's verdict lists the gateway's `i9` leakage flag.
+2. I2 client (`clients/pit.py`): it sends `format: "json"` in the body and typed filter lists, and parses
+   `{fingerprint, columns, rows, flags}` and `X-Leakage-Flag`. It no longer guesses Arrow, row-list or columnar
+   shapes, and pyarrow was removed as a dependency. `features` uses `POST /v1/features/training-set` (grid spine).
+   Rows are sorted by `valid_time`, because I2 orders them by key columns. The fake I2 now mimics all of this.
+3. S6: `TrialRecord.returns` is now null. Every look-ahead the gateway blocks itself is posted as a `LeakageEvent`
+   (`source: "i9"`, `block`, or `warn` on clamp) with the inbox fallback (`trials.TrialLogger.report_leakage`).
+   Ledger strategy ids changed from `agent/strategy` to `agent:strategy`, because S6's verdict route is
+   `{strategy_id}`, not `{strategy_id:path}`.
+4. `make report` was rerun after the fake-I2 change. Tables 3 and 4 (block rates, Fisher tests) are unchanged; the
+   latency numbers changed (stdio overhead 1.85 ms, HTTP 2.38 ms, guard cost per order 3.28 ms). The README cites
+   the new numbers. docs/report.md still has the old ones: as instructed, the corrected text went to the
+   orchestrator (scratchpad file report-corrected.md) and was not written into the repo.
+5. Contract extensions are unchanged, except that the I2 query-shape assumptions were removed from the README
+   table; the README now documents what was checked against the real services.
 
 ## Mistakes and lessons
 
-1. Only the fakes have been exercised. I7 does not exist, so live routing was tested against a second fake that speaks the Order API.
-2. The shape of I2's JSON response was an assumption when I9 was built. The client accepts row lists, `{"rows": ...}`, columnar JSON and Arrow IPC. I2 has since shipped with ISO-8601 timestamps in JSON, so verify the client against the real I2 next.
-3. I9 trials carry empty returns and link to I5's trial through `params.linked_trial_id`. S6 now accepts this and counts them toward n_trials.
-4. `LeakageEvent.source` had no `i9` value, so blocked look-ahead attempts stayed in the audit log. S6 now accepts `i9`, so the gateway can start posting them.
-5. Session-state locks work per process, so two gateway processes that serve the same session could interleave updates. Run one process per session store.
-6. The latency numbers were measured while nine other agents loaded the laptop. Rerun them on an idle machine before quoting them.
+1. I first built the I2 client from guesses: a `filters` dict, `format` as a query parameter, and several response
+   shapes. The shipped I2 forbids extra fields and takes a filter list, so the real service would have rejected
+   every gateway query with 422. Lesson: read the producer's `models.py` and `api.py` before writing a client, and
+   keep an opt-in test against the real service.
+2. The ledger strategy-id template used `/`. Starlette decodes `%2F` before routing, so S6's verdict route would
+   have answered 404 for every agent strategy. Only the real-service test can catch a mistake like this; the
+   fakes used `{strategy_id:path}` and hid it.
+3. Trials used to carry `returns: {ts: [], values: []}`. S6 accepts that, but `null` is the documented "no
+   returns" value.
+4. Only I2 and S6 are real in any test. I5, S1, S7 and I6 are fakes, and I7 does not exist, so live routing is
+   tested against a second fake.
+5. Session-state locks work per process, so two gateway processes that serve the same session could interleave
+   updates. Run one process per session store.
+6. Compound shell commands (`cd && ...`) are denied in this environment; use `git -C` and `make -C`.
