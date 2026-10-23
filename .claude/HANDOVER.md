@@ -64,11 +64,22 @@ Last task (2026-10-23): align with the shipped I2 and S6.
    (`source: "i9"`, `block`, or `warn` on clamp) with the inbox fallback (`trials.TrialLogger.report_leakage`).
    Ledger strategy ids changed from `agent/strategy` to `agent:strategy`, because S6's verdict route is
    `{strategy_id}`, not `{strategy_id:path}`.
-4. `make report` was rerun after the fake-I2 change. Tables 3 and 4 (block rates, Fisher tests) are unchanged; the
-   latency numbers changed (stdio overhead 1.85 ms, HTTP 2.38 ms, guard cost per order 3.28 ms). The README cites
-   the new numbers. docs/report.md still has the old ones: as instructed, the corrected text went to the
-   orchestrator (scratchpad file report-corrected.md) and was not written into the repo.
-5. Contract extensions are unchanged, except that the I2 query-shape assumptions were removed from the README
+4. Four bugs that S8 reported are fixed:
+   1. The order-rate window and the budget headroom now run on the session clock, so a replayed episode is not
+      treated as one wall-clock minute.
+   2. The gateway sends the session clock to I6/I7 in an `X-Tradeq-Known-At` header. I6's `OrderRequest`
+      forbids extra fields, so it cannot be a body field. The fake I6 fills and marks at the last price known at
+      that time, which equals the I2 reference price.
+   3. `gateway serve --offline` (`make serve-offline`) wires the fakes into the HTTP app.
+   4. The price table now uses current Anthropic rates: Opus 5.5 $4 / $20. Sonnet 5.5, Haiku 5.5 and Sonnet 4.6
+      were added, the unverifiable Sonnet 4.5 row was dropped, and the default (unknown-model) row is priced at
+      the Opus 5.5 rate. The demo model is now `claude-sonnet-5-5`.
+   All four have tests; 73 default tests pass.
+5. `make report` was rerun after these changes. Tables 3 and 4 are unchanged, while the latency numbers moved
+   with machine load (the final run is noisy; see the per-run medians). The README cites the final run.
+   docs/report.md still holds the 2026-10-22 numbers: as instructed, the corrected text went to the orchestrator
+   (scratchpad report-corrected.md) and was not written into the repo.
+6. Contract extensions are unchanged, except that the I2 query-shape assumptions were removed from the README
    table; the README now documents what was checked against the real services.
 
 ## Mistakes and lessons
@@ -86,4 +97,9 @@ Last task (2026-10-23): align with the shipped I2 and S6.
    tested against a second fake.
 5. Session-state locks work per process, so two gateway processes that serve the same session could interleave
    updates. Run one process per session store.
-6. Compound shell commands (`cd && ...`) are denied in this environment; use `git -C` and `make -C`.
+6. The order-rate window used the wall clock, and the fake I6 filled at the frozen offline wall clock. Neither
+   bug showed up in this repo's tests, because they never moved a session clock during a paper session. S8's
+   replayed season found both. Lesson: test every budget with a moving session clock.
+7. The price table was written from memory (Opus at 15/75). Verify prices against a current source and record
+   the check date.
+8. Compound shell commands (`cd && ...`) are denied in this environment; use `git -C` and `make -C`.
