@@ -92,6 +92,7 @@ class LedgerSettings(BaseModel):
     source: str
     inbox_relpath: str
     family_prefix: str
+    backtest_family_template: str
     strategy_id_template: str
     periods_per_year: float = Field(gt=0)
 

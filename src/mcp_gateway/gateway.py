@@ -88,6 +88,7 @@ from mcp_gateway.trials import Destination, LoggedTrial, TrialLogger, build_tria
 log = structlog.get_logger(__name__)
 
 HTTP_NOT_FOUND = 404
+SEED_PARAM = "seed"
 LEAKAGE_SOURCE: Literal["i9"] = "i9"  # contract 6.1 extension accepted by S6
 LOOKAHEAD_KIND = "end_after_known_at"
 LOOKAHEAD_CLAMPED_KIND = "end_clamped_to_known_at"
@@ -659,6 +660,9 @@ class Gateway:
             idea = {"strategy": strategy, "params": params, "universe": universe, "start": start, "end": end}
             idea |= {"fidelity": fidelity, "known_at": known_at, "session_id": session.session_id}
             seed = params.get("seed") if isinstance(params.get("seed"), int) else None
+            family = self.settings.ledger.backtest_family_template.format(
+                strategy=strategy, universe="+".join(universe)
+            )
             session.usage.backtests += 1
             session.usage.add_strategy(strategy_id)
             try:
@@ -671,6 +675,7 @@ class Gateway:
                     session,
                     {
                         "kind": "backtest",
+                        "family": family,
                         "strategy_id": strategy_id,
                         "params": idea,
                         "metrics": {},
@@ -691,6 +696,7 @@ class Gateway:
                     session,
                     {
                         "kind": "backtest",
+                        "family": family,
                         "strategy_id": strategy_id,
                         "params": idea | {"run_id": response.run_id},
                         "metrics": response.metrics,
@@ -746,7 +752,9 @@ class Gateway:
         return await self.downstream.backtest.run(
             BacktestRequest(
                 strategy=strategy,
-                params=params,
+                # The tool contract carries the seed inside params; I5 takes it as its own field and rejects
+                # unknown strategy parameters, so it moves out of params here.
+                params={k: v for k, v in params.items() if k != SEED_PARAM},
                 universe=universe,
                 start=to_iso(window.start),
                 end=to_iso(window.end),
@@ -754,7 +762,7 @@ class Gateway:
                 known_at=to_iso(self.known_at(session)),
                 strategy_id=strategy_id,
                 actor=Actor(kind="agent", id=session.agent_id),
-                seed=params["seed"] if isinstance(params.get("seed"), int) else None,
+                seed=params[SEED_PARAM] if isinstance(params.get(SEED_PARAM), int) else None,
             )
         )
 

@@ -8,6 +8,7 @@ through its own CLI (``pit ingest tape.trades``) from a contract-6.2 tape file. 
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -33,6 +34,10 @@ PIT_REPO = WORKSPACE / "point-in-time-store"
 LEDGER_REPO = WORKSPACE / "research-ledger"
 PIT_BIN = PIT_REPO / ".venv" / "bin"
 LEDGER_BIN = LEDGER_REPO / ".venv" / "bin"
+BT_REPO = WORKSPACE / "backtest-orchestrator"
+BT_BIN = BT_REPO / ".venv" / "bin"
+BT_STRATEGY = "sma_cross"  # registered in I5 (GET /v1/strategies)
+BT_PARAMS = {"fast": 2, "slow": 5, "qty": 0.01, "seed": 3}  # the gateway moves seed to I5's own field
 STARTUP_TIMEOUT_S = 60.0
 KNOWN_AT = "2025-06-01T00:00:00Z"
 NS = 1_000_000_000
@@ -80,18 +85,20 @@ class RealServices:
     data_dir: Path
     pit_url: str
     ledger_url: str
+    backtest_url: str
 
 
 @pytest.fixture
 def real_services() -> Iterator[RealServices]:
-    for binary in (PIT_BIN / "pit", PIT_BIN / "python", LEDGER_BIN / "ledger"):
+    for binary in (PIT_BIN / "pit", PIT_BIN / "python", LEDGER_BIN / "ledger", BT_BIN / "bt"):
         if not binary.exists():
             pytest.skip(f"{binary} not found; run make setup in the sibling repository")
     scratch = REPO / "tmp" / f"integration-{uuid.uuid4().hex[:8]}"
     data_dir = scratch / "data"
     data_dir.mkdir(parents=True)
-    pit_port, ledger_port = _free_port(), _free_port()
+    pit_port, ledger_port, bt_port = _free_port(), _free_port(), _free_port()
     ledger_url, pit_url = f"http://127.0.0.1:{ledger_port}", f"http://127.0.0.1:{pit_port}"
+    bt_url = f"http://127.0.0.1:{bt_port}"
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", str(scratch)),
@@ -99,6 +106,14 @@ def real_services() -> Iterator[RealServices]:
         "LEDGER_SERVICE__PORT": str(ledger_port),
         "PIT_SERVICE__PORT": str(pit_port),
         "PIT_LEDGER__BASE_URL": ledger_url,
+        # I5 against the real I2 (bars aggregated from tape.trades, JSON times) and the real S6.
+        "BT_SERVICE__PORT": str(bt_port),
+        "BT_PIT__MODE": "http",
+        "BT_PIT__BASE_URL": pit_url,
+        "BT_PIT__BARS_SOURCE": "trades",
+        "BT_MARKET__VENUE": "binance",
+        "BT_LEDGER__MODE": "http",
+        "BT_LEDGER__BASE_URL": ledger_url,
     }
     tape_root = data_dir / "market-tape-recorder" / "tape"
     start_ns = (1748736000 - 2 * 3600) * NS  # 2025-05-31T22:00:00Z, two hours before KNOWN_AT
@@ -120,12 +135,13 @@ def real_services() -> Iterator[RealServices]:
         for name, cmd, url in (
             ("ledger", [str(LEDGER_BIN / "ledger"), "serve"], ledger_url),
             ("pit", [str(PIT_BIN / "pit"), "serve", "--port", str(pit_port)], pit_url),
+            ("bt", [str(BT_BIN / "bt"), "serve"], bt_url),
         ):
             log = scratch / f"{name}.log"
             proc = subprocess.Popen(cmd, env=env, cwd=scratch, stdout=log.open("wb"), stderr=subprocess.STDOUT)
             procs.append(proc)
             _wait_healthy(url, proc, log)
-        yield RealServices(data_dir=data_dir, pit_url=pit_url, ledger_url=ledger_url)
+        yield RealServices(data_dir=data_dir, pit_url=pit_url, ledger_url=ledger_url, backtest_url=bt_url)
     finally:
         for proc in procs:
             proc.terminate()
@@ -138,6 +154,7 @@ def _settings(settings: Settings, svc: RealServices) -> Settings:
         update={
             "pit": settings.services.pit.model_copy(update={"base_url": svc.pit_url}),
             "ledger": settings.services.ledger.model_copy(update={"base_url": svc.ledger_url}),
+            "backtest": settings.services.backtest.model_copy(update={"base_url": svc.backtest_url}),
         }
     )
     return settings.model_copy(update={"services": services})
@@ -146,7 +163,9 @@ def _settings(settings: Settings, svc: RealServices) -> Settings:
 async def test_research_and_paper_session_against_real_i2_and_s6(
     settings: Settings, real_services: RealServices
 ) -> None:
-    h = Harness.create(_settings(settings, real_services), admin_key=ADMIN_KEY, real_services={"pit", "ledger"})
+    h = Harness.create(
+        _settings(settings, real_services), admin_key=ADMIN_KEY, real_services={"pit", "ledger", "backtest"}
+    )
     d = h.settings.demo
     tape = {"venue": d.venue, "symbol": d.symbol, "channel": "trades"}
     research = await h.create_session(agent_id="itest", mode="research", known_at=KNOWN_AT)
@@ -165,34 +184,40 @@ async def test_research_and_paper_session_against_real_i2_and_s6(
 
         bt = await agent.call(
             "run_backtest",
-            strategy="tsmom",
-            params={"seed": 1},
+            strategy=BT_STRATEGY,
+            params=BT_PARAMS,
             universe=[d.symbol],
-            start="2025-05-01T00:00:00Z",
+            start="2025-05-31T22:00:00Z",
             end=KNOWN_AT,
             fidelity="vectorised",
         )
-        assert bt.data["logged_to"] == "ledger", bt.data
+        assert not bt.is_error, json.dumps(bt.data)
+        assert bt.data["logged_to"] == "i5"
         peek = await agent.call(
             "run_backtest",
-            strategy="tsmom",
-            params={"seed": 2},
+            strategy=BT_STRATEGY,
+            params=BT_PARAMS,
             universe=[d.symbol],
-            start="2025-05-01T00:00:00Z",
+            start="2025-05-31T22:00:00Z",
             end="2025-06-02T00:00:00Z",
             fidelity="vectorised",
         )
         assert peek.code == "time_travel"
 
-        verdict = await agent.call("verdict", strategy_id="tsmom")
+        verdict = await agent.call("verdict", strategy_id=BT_STRATEGY)
         assert not verdict.is_error, verdict.data
-        assert verdict.data["verdict"]["strategy_id"] == "itest:tsmom"
-        assert verdict.data["verdict"]["n_trials"] == 2
+        assert verdict.data["verdict"]["strategy_id"] == f"itest:{BT_STRATEGY}"
+        assert verdict.data["verdict"]["n_trials"] == 2, json.dumps(verdict.data["verdict"])
         assert not verdict.data["promotable"]
         flags = verdict.data["verdict"]["leakage_flags"]
         assert [(f["source"], f["severity"], f["kind"]) for f in flags] == [("i9", "block", "end_after_known_at")], (
             flags
         )
+        async with httpx.AsyncClient(base_url=real_services.ledger_url) as ledger:
+            family = (await ledger.get(f"/v1/families/{verdict.data['verdict']['family']}")).json()
+        assert family["n_trials"] == 2, family
+        assert family["sources"] == {"i5": 1, "i9": 1}, json.dumps(family)
+        assert family["actors"] == {"agent": 2}, json.dumps(family)  # S6 counts actors by kind
         budget = await agent.call("budget")
         assert budget.data["usage"]["trials_logged"] == 2
         assert budget.data["usage"]["trials_inboxed"] == 0
@@ -205,7 +230,7 @@ async def test_research_and_paper_session_against_real_i2_and_s6(
             side="buy",
             type="market",
             qty=0.01,
-            strategy_id="tsmom",
+            strategy_id=BT_STRATEGY,
             rationale="integration test",
         )
         assert not order.is_error, order.data

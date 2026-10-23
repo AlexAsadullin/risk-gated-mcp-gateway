@@ -41,6 +41,10 @@ ledger:
   source: i9
   inbox_relpath: research-ledger/inbox
   family_prefix: risk-gated-mcp-gateway
+  # Family of backtest trials the gateway logs itself (refused or failed runs). It mirrors I5's
+  # ledger.family_template, because S6 counts n_trials per family: a refused attempt must land in the family
+  # of the I5 trials of the same strategy, or S6 would not count it.
+  backtest_family_template: "i5/{strategy}/{universe}"
   # How agent-facing strategy names map to ledger strategy ids, so two agents never share a strategy.
   # No '/': S6 serves GET /v1/strategies/{strategy_id}/verdict, which cannot match an id containing a slash.
   strategy_id_template: "{agent_id}:{strategy}"

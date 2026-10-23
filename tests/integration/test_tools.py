@@ -468,6 +468,7 @@ async def test_verdict_resolves_the_strategy_id_given_to_i5(harness: Harness) ->
     assert sent.actor is not None
     assert (sent.actor.kind, sent.actor.id) == ("agent", "ag")
     assert sent.seed == 7
+    assert "seed" not in sent.params
     assert not verdict.is_error
     assert verdict.data["ledger_strategy_id"] == sent.strategy_id
     assert verdict.data["verdict"]["strategy_id"] == sent.strategy_id

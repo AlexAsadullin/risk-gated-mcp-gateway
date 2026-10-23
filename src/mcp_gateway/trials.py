@@ -60,6 +60,7 @@ def build_trial(
     finished_at: datetime,
     seed: int | None = None,
     dataset_fingerprint: str | None = None,
+    family: str | None = None,
 ) -> TrialRecord:
     """Build a contract-6.1 trial record for an agent idea of a given ``kind`` (``backtest`` or ``order-intent``).
 
@@ -68,7 +69,7 @@ def build_trial(
     """
     return TrialRecord(
         trial_id=str(uuid.uuid4()),
-        family=f"{settings.family_prefix}/{agent_id}/{kind}/{strategy_id}",
+        family=family or f"{settings.family_prefix}/{agent_id}/{kind}/{strategy_id}",
         strategy_id=strategy_id,
         source=settings.source,
         actor=Actor(kind="agent", id=agent_id),

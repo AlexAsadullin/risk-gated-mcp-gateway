@@ -260,6 +260,7 @@ def test_strategy_id_mapping() -> None:
         source="i9",
         inbox_relpath="x",
         family_prefix="p",
+        backtest_family_template="i5/{strategy}/{universe}",
         strategy_id_template="{agent_id}/{strategy}",
         periods_per_year=1.0,
     ).strategy_id_template
