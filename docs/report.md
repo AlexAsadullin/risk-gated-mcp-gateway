@@ -1,6 +1,6 @@
 # Risk-gated MCP Gateway: research report
 
-The present study belongs to the present project, which is project I9 of the Tradeq platform. All numbers below come from one run of make report on 2026-10-22, which wrote them to $TRADEQ_DATA_DIR/risk-gated-mcp-gateway/reports/metrics.json and tables.md.
+The present study belongs to the present project, which is project I9 of the Tradeq platform. All numbers below come from one run of make report on 2026-10-23, after the fake I2 and the fake I6 were aligned with the shipped services and the session clock, and that run wrote them to $TRADEQ_DATA_DIR/risk-gated-mcp-gateway/reports/metrics.json and tables.md.
 
 ## Question
 
@@ -8,7 +8,7 @@ The present project gives AI agents one Model Context Protocol (MCP) server, whi
 
 ## Data
 
-All experiments run on synthetic data, so the results describe the behaviour of the software and are not market evidence. The in-process fakes of the downstream services, which live in src/mcp_gateway/fakes, generate a price for each symbol and each one-minute bar i as p0 times exp(a sin(2 pi i / P) + s z), where p0 is the base price, a is 0.02, P is 720 bars, s is 0.001 and z is a standard normal draw that a generator seeded with the symbol and the bar index produces. Each bar becomes knowable one second after its valid time, which gives the fake point-in-time store (I2) a knowledge time for every row. The fake shadow exchange (I6) fills market orders at the synthetic price, and it keeps cash and positions per account, which starts with 100,000 USDT of cash. The fake research ledger (S6) stores every trial that it receives, and the fake leakage probe (S7) flags only the model id leaky-llm. All parameters sit in the fakes and demo sections of config/settings.yaml, and the report seed is 20261021.
+All experiments run on synthetic data, so the results describe the behaviour of the software and are not market evidence. The in-process fakes of the downstream services, which live in src/mcp_gateway/fakes, generate a price for each symbol and each one-minute bar i as p0 times exp(a sin(2 pi i / P) + s z), where p0 is the base price, a is 0.02, P is 720 bars, s is 0.001 and z is a standard normal draw that a generator seeded with the symbol and the bar index produces. Each bar becomes knowable one second after its valid time, which gives the fake point-in-time store (I2) a knowledge time for every row. The fake shadow exchange (I6) fills market orders at the last synthetic price that is known at the order's session clock, and it keeps cash and positions per account, which starts with 100,000 USDT of cash. The fake research ledger (S6) stores every trial that it receives, and the fake leakage probe (S7) flags only the model id leaky-llm. All parameters sit in the fakes and demo sections of config/settings.yaml, and the report seed is 20261021.
 
 ## Methods
 
@@ -20,30 +20,30 @@ The adversarial experiment, which bench/adversary.py implements, runs 200 episod
 
 ## Experiments and results
 
-The streamable HTTP transport adds about one millisecond more than stdio to a market_data call, but both overheads stay below 5 ms, so the transport choice does not limit an agent that thinks for seconds per decision. As Table 1 shows, the direct call takes a median of 2.626 ms with a 95% interval from 2.610 to 2.652 ms, the in-process MCP client adds 1.370 ms (1.334 to 1.401), stdio adds 3.013 ms (2.962 to 3.060), and streamable HTTP adds 4.046 ms (3.959 to 4.139). The per-run medians of streamable HTTP range from 5.80 to 7.27 ms, which is a spread of 1.47 ms, so the gap of 1.03 ms between the two transports is of the same size as the variation between runs on this laptop.
+The streamable HTTP transport adds about 0.75 ms more than stdio to a market_data call, but both overheads stay below 3.5 ms, so the transport choice does not limit an agent that thinks for seconds per decision. As Table 1 shows, the direct call takes a median of 2.702 ms with a 95% interval from 2.679 to 2.741 ms, the in-process MCP client adds 1.524 ms (1.451 to 1.611), stdio adds 2.578 ms (2.465 to 2.714), and streamable HTTP adds 3.326 ms (3.200 to 3.488). The per-run medians of streamable HTTP range from 4.98 to 7.38 ms, which is a spread of 2.40 ms, so the gap of 0.75 ms between the two transports is smaller than the variation between runs on this laptop.
 
 Table 1 lists the per-call latency in milliseconds, which we measured over 900 calls per row in three runs of 300.
 
 | Transport | Tool | n | Median | 95% CI of median | p95 | Per-run medians | Overhead vs direct (95% CI) |
 |---|---|---|---|---|---|---|---|
-| baseline_direct | market_data | 900 | 1.595 | 1.588 to 1.602 | 2.007 | 1.50, 1.64, 1.60 | -1.031 (-1.056 to -1.012) |
-| direct | clock | 900 | 0.576 | 0.570 to 0.583 | 0.764 | 0.54, 0.62, 0.57 | |
-| direct | market_data | 900 | 2.626 | 2.610 to 2.652 | 3.152 | 2.45, 2.69, 2.73 | |
-| mcp_in_process | clock | 900 | 0.936 | 0.929 to 0.945 | 1.405 | 0.88, 0.98, 0.93 | |
-| mcp_in_process | market_data | 900 | 3.996 | 3.970 to 4.019 | 5.295 | 3.86, 4.29, 3.90 | 1.370 (1.334 to 1.401) |
-| mcp_stdio | clock | 900 | 2.227 | 2.199 to 2.262 | 3.501 | 2.33, 2.26, 2.11 | |
-| mcp_stdio | market_data | 900 | 5.639 | 5.591 to 5.683 | 6.863 | 5.71, 5.91, 5.24 | 3.013 (2.962 to 3.060) |
-| mcp_streamable_http | clock | 900 | 2.801 | 2.758 to 2.849 | 4.838 | 2.84, 3.38, 2.53 | |
-| mcp_streamable_http | market_data | 900 | 6.672 | 6.590 to 6.766 | 8.872 | 6.97, 7.27, 5.80 | 4.046 (3.959 to 4.139) |
+| baseline_direct | market_data | 900 | 1.799 | 1.774 to 1.826 | 2.840 | 2.16, 1.78, 1.56 | -0.903 (-0.952 to -0.865) |
+| direct | clock | 900 | 0.496 | 0.490 to 0.501 | 0.731 | 0.56, 0.47, 0.47 | |
+| direct | market_data | 900 | 2.702 | 2.679 to 2.741 | 4.613 | 3.48, 2.61, 2.54 | |
+| mcp_in_process | clock | 900 | 0.697 | 0.687 to 0.708 | 1.437 | 1.02, 0.65, 0.68 | |
+| mcp_in_process | market_data | 900 | 4.226 | 4.163 to 4.308 | 8.270 | 5.00, 3.50, 4.13 | 1.524 (1.451 to 1.611) |
+| mcp_stdio | clock | 900 | 1.633 | 1.613 to 1.664 | 2.608 | 1.89, 1.43, 1.66 | |
+| mcp_stdio | market_data | 900 | 5.281 | 5.175 to 5.416 | 8.486 | 6.44, 4.41, 5.37 | 2.578 (2.465 to 2.714) |
+| mcp_streamable_http | clock | 900 | 2.156 | 2.116 to 2.207 | 4.600 | 2.90, 1.72, 2.22 | |
+| mcp_streamable_http | market_data | 900 | 6.028 | 5.908 to 6.185 | 10.755 | 6.31, 4.98, 7.38 | 3.326 (3.200 to 3.488) |
 
-The guards cost about 1 ms on a data call and about 4.4 ms on an order, because the guarded gateway makes extra downstream calls and writes an audit entry with a file sync. As Table 1 shows, the pass-through baseline answers market_data in a median of 1.595 ms, while the guarded gateway needs 2.626 ms, which is a difference of 1.031 ms (1.012 to 1.056) that comes from the session lookup, the window check, the trial counters and the audit write. As Table 2 shows, the guarded place_order takes a median of 4.670 ms against 0.312 ms for the baseline, which is a difference of 4.358 ms (4.323 to 4.396), because each guarded order also asks I2 for the reference price, asks I6 for positions and equity, and logs the order intent as a trial in S6.
+The guards cost about 0.9 ms on a data call and about 4 ms on an order, because the guarded gateway makes extra downstream calls and writes an audit entry with a file sync. As Table 1 shows, the pass-through baseline answers market_data in a median of 1.799 ms, while the guarded gateway needs 2.702 ms, which is a difference of 0.903 ms (0.865 to 0.952) that comes from the session lookup, the window check, the sort by valid time, the trial counters and the audit write. As Table 2 shows, the guarded place_order takes a median of 4.305 ms against 0.267 ms for the baseline, which is a difference of 4.038 ms (4.003 to 4.090), because each guarded order also asks I2 for the reference price, asks I6 for positions and equity, and logs the order intent as a trial in S6.
 
 Table 2 lists the place_order latency in milliseconds, which we measured with direct calls against the same fake I6.
 
 | Arm | n | Median | 95% CI of median | p95 |
 |---|---|---|---|---|
-| guarded | 900 | 4.670 | 4.636 to 4.709 | 5.462 |
-| baseline | 900 | 0.312 | 0.311 to 0.314 | 0.411 |
+| guarded | 900 | 4.305 | 4.268 to 4.362 | 7.246 |
+| baseline | 900 | 0.267 | 0.265 to 0.269 | 0.461 |
 
 The guarded gateway blocked all 1,225 violations and refused none of the 2,686 benign controls, while the pass-through baseline blocked none of the violations. As Table 3 shows, the pooled block rate of the guarded gateway is 100% with a Wilson lower bound of 99.7%, and its pooled false-refusal rate is 0% with a Wilson upper bound of 0.14%. The smallest class is the drawdown attack with 64 violations, so its lower bound of 94.3% is the weakest per-class guarantee in the table. The baseline returned 11,620 rows from after the session clock in the 100 look-ahead data attempts, which is 116.2 rows per attempt, while the guarded gateway returned none. The guarded gateway froze 163 sessions, which equals the 99 token overspends plus the 64 drawdown breaches, so every budget breach that is configured to freeze did freeze its session.
 
@@ -84,7 +84,7 @@ Table 4 lists Fisher's exact test, which compares the blocked counts of the two 
 | drawdown | 64 / 64 | 0 / 64 | 8.35e-38 |
 | all | 1225 / 1225 | 0 / 1225 | < 1e-300 |
 
-One parameter changed during the study, because a single run did not separate the two transports. The number of latency runs, which is demo.report_latency_repeats, went from 1 to 3 after two single runs of 300 calls ranked the transports in opposite orders, since the first run measured a market_data overhead of 6.27 ms for streamable HTTP and 5.30 ms for stdio, while the second run measured 4.67 ms and 5.98 ms. The pooled three-run result in Table 1 therefore replaces both single runs, and the per-run medians column shows how far the runs still differ.
+One parameter changed during the study, because a single run did not separate the two transports. The number of latency runs, which is demo.report_latency_repeats, went from 1 to 3 after two single runs of 300 calls ranked the transports in opposite orders, since the first run measured a market_data overhead of 6.27 ms for streamable HTTP and 5.30 ms for stdio, while the second run measured 4.67 ms and 5.98 ms. The pooled three-run result in Table 1 therefore replaces both single runs, and the per-run medians column shows how far the runs still differ. The fakes also changed before the final run, because the shipped I2 answers JSON with ISO-8601 timestamps and orders rows by key columns, and because the fake I6 now fills at the last price known at the session clock. Those changes moved the latency numbers, but every count in Tables 3 and 4 stayed the same.
 
 ## Comparison with analogs
 
@@ -94,11 +94,11 @@ The pass-through baseline stands for laukikk/alpaca-mcp, which the specification
 
 ## Decision
 
-The present project serves both transports and makes streamable HTTP the default for the Agent Arena (S8), because the difference between them is about 1 ms and HTTP lets one server hold many sessions with per-session keys. As Table 1 shows, both transports stay under 5 ms of overhead on a data call, which is small against the latency of an LLM decision or an I5 backtest. Stdio stays available for desktop clients that start one server per agent. The guards stay on every call, because they cost 1.031 ms per data call and 4.358 ms per order, as Tables 1 and 2 show, while Table 3 shows that without them all 1,225 violations reach the services and 11,620 future rows reach the agents.
+The present project serves both transports and makes streamable HTTP the default for the Agent Arena (S8), because the difference between them is about 0.75 ms and HTTP lets one server hold many sessions with per-session keys. As Table 1 shows, both transports stay under 3.5 ms of overhead on a data call, which is small against the latency of an LLM decision or an I5 backtest. Stdio stays available for desktop clients that start one server per agent. The guards stay on every call, because they cost 0.903 ms per data call and 4.038 ms per order, as Tables 1 and 2 show, while Table 3 shows that without them all 1,225 violations reach the services and 11,620 future rows reach the agents.
 
 ## Limitations
 
-The results rest on synthetic fakes that run in the same process, so the latency numbers measure the gateway and the protocol stack, and they exclude network time to real I2, I5 and I6 services. The laptop also ran other development agents during the study, which explains part of the spread between runs that Table 1 shows. The adversarial agents are scripted, which means that they test the stated rules at sampled parameters, but they do not search for rules that are missing. The trial records that the gateway sends to S6 carry no return series, because I5 keeps the returns, so S6 must join the gateway trial with the I5 trial through params.linked_trial_id. The I7 execution engine does not exist yet, so we tested live routing only against a second fake that speaks the Order API.
+The results rest on synthetic fakes that run in the same process, so the latency numbers measure the gateway and the protocol stack, and they exclude network time to real I2, I5 and I6 services. The laptop also ran other development agents during the study, which explains part of the spread between runs that Table 1 shows. A separate opt-in test, which make test-integration runs, drives the gateway against the shipped I2 and S6 services, while the experiments in this report still use the fakes. The adversarial agents are scripted, which means that they test the stated rules at sampled parameters, but they do not search for rules that are missing. The trial records that the gateway sends to S6 carry no return series, because I5 keeps the returns, so S6 must join the gateway trial with the I5 trial through params.linked_trial_id. The I7 execution engine does not exist yet, so we tested live routing only against a second fake that speaks the Order API.
 
 ## References
 
