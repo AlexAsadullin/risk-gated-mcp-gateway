@@ -681,19 +681,25 @@ class Gateway:
                     },
                 )
                 raise
-            logged = await self._log_trial(
-                session,
-                {
-                    "kind": "backtest",
-                    "strategy_id": strategy_id,
-                    "params": idea | {"run_id": response.run_id, "linked_trial_id": response.trial_id},
-                    "metrics": response.metrics,
-                    "tags": ["completed", *([f"linked:i5:{response.trial_id}"] if response.trial_id else [])],
-                    "started_at": started,
-                    "finished_at": self.clock.now(),
-                    "seed": seed,
-                },
-            )
+            if response.trial_id is not None:
+                # I5 logged this run in S6 under our strategy id and agent actor; a second record would count
+                # the same backtest twice in n_trials.
+                logged = LoggedTrial(trial_id=response.trial_id, destination=Destination.I5)
+                session.usage.trials_logged += 1
+            else:
+                logged = await self._log_trial(
+                    session,
+                    {
+                        "kind": "backtest",
+                        "strategy_id": strategy_id,
+                        "params": idea | {"run_id": response.run_id},
+                        "metrics": response.metrics,
+                        "tags": ["completed"],
+                        "started_at": started,
+                        "finished_at": self.clock.now(),
+                        "seed": seed,
+                    },
+                )
             return BacktestResult(
                 run_id=response.run_id,
                 strategy=strategy,
@@ -746,6 +752,9 @@ class Gateway:
                 end=to_iso(window.end),
                 fidelity=fidelity,
                 known_at=to_iso(self.known_at(session)),
+                strategy_id=strategy_id,
+                actor=Actor(kind="agent", id=session.agent_id),
+                seed=params["seed"] if isinstance(params.get("seed"), int) else None,
             )
         )
 

@@ -236,6 +236,9 @@ class ForecastResponse(WireModel):
 
 
 class BacktestRequest(WireModel):
+    """Body of I5 ``POST /v1/backtests``. ``strategy_id``, ``actor`` and ``seed`` are I5's optional fields: with
+    them I5 logs its trial under the gateway's agent-scoped ledger id and credits it to the agent."""
+
     strategy: str
     params: dict[str, Any]
     universe: list[str]
@@ -243,6 +246,9 @@ class BacktestRequest(WireModel):
     end: str
     fidelity: Fidelity
     known_at: str
+    strategy_id: str | None = None
+    actor: Actor | None = None
+    seed: int | None = None
 
 
 class BacktestResponse(WireModel):

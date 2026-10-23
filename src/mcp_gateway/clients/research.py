@@ -25,7 +25,7 @@ class BacktestClient(ServiceClient):
     service = "backtest"
 
     async def run(self, request: BacktestRequest) -> BacktestResponse:
-        response = await self.request("POST", "/v1/backtests", json=request.model_dump(mode="json"))
+        response = await self.request("POST", "/v1/backtests", json=request.model_dump(mode="json", exclude_none=True))
         return BacktestResponse.model_validate(response.json())
 
 

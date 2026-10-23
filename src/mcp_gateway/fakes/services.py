@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from mcp_gateway.contracts import (
     AS_OF_HEADER,
     Account,
+    Actor,
     BacktestRequest,
     BacktestResponse,
     ForecastRequest,
@@ -195,7 +196,14 @@ def build_fake_forecast(world: SyntheticWorld) -> FastAPI:
     return app
 
 
-def build_fake_backtest(world: SyntheticWorld, received: list[BacktestRequest]) -> FastAPI:
+FAKE_I5_ACTOR = Actor(kind="human", id="bt-cli")
+
+
+def build_fake_backtest(
+    world: SyntheticWorld, received: list[BacktestRequest], ledger: LedgerState, clock: Clock
+) -> FastAPI:
+    """Fake of I5: like the shipped service it logs each run as a trial in S6 itself, under the request's
+    ``strategy_id`` and ``actor`` when given (defaults ``i5-<strategy>-<universe>`` and I5's own actor)."""
     app = FastAPI()
 
     @app.post("/v1/backtests")
@@ -203,11 +211,28 @@ def build_fake_backtest(world: SyntheticWorld, received: list[BacktestRequest]) 
         received.append(body)
         key = json.dumps(body.model_dump(mode="json"), sort_keys=True)
         sharpe = round((_stable_unit(world.seed, key) - 0.3) * 3.0, 4)
+        trial_id = str(uuid.UUID(int=int(_stable_unit(world.seed, key, "trial") * 2**64)))
+        universe = "+".join(body.universe)
+        metrics = {"sharpe": sharpe, "n_periods": 24 * 30}
+        now = to_iso(clock.now())
+        ledger.trials.append(
+            TrialRecord(
+                trial_id=trial_id,
+                family=f"i5/{body.strategy}/{universe}",
+                strategy_id=body.strategy_id or f"i5-{body.strategy}-{universe}",
+                source="i5",
+                actor=body.actor or FAKE_I5_ACTOR,
+                params=body.params,
+                seed=body.seed,
+                started_at=now,
+                finished_at=now,
+                periods_per_year=365 * 24 * 60,
+                metrics=metrics,
+                tags=["i5"],
+            )
+        )
         return BacktestResponse(
-            run_id=f"run-{len(received):04d}",
-            trial_id=str(uuid.UUID(int=int(_stable_unit(world.seed, key, "trial") * 2**64))),
-            metrics={"sharpe": sharpe, "n_periods": 24 * 30},
-            fidelity_report=None,
+            run_id=f"run-{len(received):04d}", trial_id=trial_id, metrics=metrics, fidelity_report=None
         )
 
     return app
@@ -414,7 +439,7 @@ class FakePlatform:
         return {
             "pit": build_fake_pit(self.world, self.pit_queries, leak_future_rows=self.leak_future_rows),
             "forecast": build_fake_forecast(self.world),
-            "backtest": build_fake_backtest(self.world, self.backtests),
+            "backtest": build_fake_backtest(self.world, self.backtests, self.ledger, self.clock),
             "ledger": build_fake_ledger(self.ledger, self.cfg, self.clock),
             "leakage": build_fake_leakage(self.cfg),
             "shadow": build_fake_exchange(self.world, self.exchange, self.cfg, self.clock),

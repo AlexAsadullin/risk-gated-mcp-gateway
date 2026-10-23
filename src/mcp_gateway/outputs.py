@@ -72,7 +72,9 @@ class BacktestResult(ToolOutput):
     strategy: str
     ledger_strategy_id: str
     backtest_trial_id: str | None = Field(description="Trial id I5 recorded for the run, if any.")
-    gateway_trial_id: str = Field(description="Trial id of this idea in the Research Ledger (S6).")
+    gateway_trial_id: str = Field(
+        description="Trial id of this idea in the Research Ledger (S6); I5's own trial when logged_to is 'i5'."
+    )
     logged_to: Destination
     known_at: str
     start: str

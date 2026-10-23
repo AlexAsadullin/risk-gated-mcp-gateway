@@ -29,6 +29,7 @@ log = structlog.get_logger(__name__)
 class Destination(StrEnum):
     LEDGER = "ledger"
     INBOX = "inbox"
+    I5 = "i5"  # the backtest service logged the trial in S6 itself, under the gateway's strategy id
 
 
 class LoggedTrial(BaseModel):

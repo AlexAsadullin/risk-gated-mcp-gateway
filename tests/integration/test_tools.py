@@ -119,7 +119,8 @@ async def test_research_flow(harness: Harness) -> None:
             fidelity="event",
         )
         assert not bt.is_error
-        assert bt.data["logged_to"] == "ledger"
+        assert bt.data["logged_to"] == "i5"
+        assert bt.data["gateway_trial_id"] == bt.data["backtest_trial_id"]
         assert bt.data["ledger_strategy_id"] == "ag:mom"
         peek = await a.call(
             "run_backtest",
@@ -146,7 +147,9 @@ async def test_research_flow(harness: Harness) -> None:
     trials = harness.platform.ledger.trials
     assert len(trials) == 3
     assert trials[0].seed == 3
-    assert trials[0].params["linked_trial_id"]
+    assert trials[0].source == "i5"
+    assert trials[0].strategy_id == "ag:mom"
+    assert trials[0].actor.model_dump() == {"kind": "agent", "id": "ag"}
     assert "refused:time_travel" in trials[1].tags
     assert "refused:mode_forbidden" in trials[2].tags
     assert all(q.mode == "research" and q.known_at == "2025-06-01T00:00:00Z" for q in harness.platform.pit_queries)
@@ -358,8 +361,9 @@ async def test_live_mode_gate(settings: Settings) -> None:
     await disabled.gateway.downstream.aclose()
 
     live = with_updates(settings, "modes", live_enabled=True)
+    strict = with_updates(live, "fakes", verdict_min_sharpe=100.0)
     lenient = with_updates(live, "fakes", verdict_min_sharpe=-100.0)
-    for cfg, expect_routed in ((live, False), (lenient, True)):
+    for cfg, expect_routed in ((strict, False), (lenient, True)):
         h = Harness.create(cfg, admin_key=ADMIN_KEY)
         r = await research(h)
         async with h.agent(r["api_key"]) as a:
@@ -443,3 +447,30 @@ async def test_paper_fills_at_session_clock_price(harness: Harness) -> None:
         assert fill == pytest.approx(world.last_known_price(symbol, at))
     assert first.data["order"]["price"] != pytest.approx(world.last_known_price(symbol, harness.clock.now()))
     assert first.data["order"]["price"] != pytest.approx(second.data["order"]["price"])
+
+
+async def test_verdict_resolves_the_strategy_id_given_to_i5(harness: Harness) -> None:
+    """I5 logs the backtest under the id the gateway sends; verdict() must ask S6 for that same id."""
+    s = await research(harness)
+    async with harness.agent(s["api_key"]) as a:
+        bt = await a.call(
+            "run_backtest",
+            strategy="mom",
+            params={"seed": 7},
+            universe=["BTC-USDT-PERP"],
+            start="2025-05-01",
+            end="2025-06-01",
+            fidelity="event",
+        )
+        verdict = await a.call("verdict", strategy_id="mom")
+    sent = harness.platform.backtests[-1]
+    assert sent.strategy_id == bt.data["ledger_strategy_id"] == "ag:mom"
+    assert sent.actor is not None
+    assert (sent.actor.kind, sent.actor.id) == ("agent", "ag")
+    assert sent.seed == 7
+    assert not verdict.is_error
+    assert verdict.data["ledger_strategy_id"] == sent.strategy_id
+    assert verdict.data["verdict"]["strategy_id"] == sent.strategy_id
+    assert verdict.data["verdict"]["n_trials"] == 1
+    logged = [t for t in harness.platform.ledger.trials if t.strategy_id == sent.strategy_id]
+    assert [t.trial_id for t in logged] == [bt.data["backtest_trial_id"]]
