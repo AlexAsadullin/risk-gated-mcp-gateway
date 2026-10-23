@@ -82,6 +82,22 @@ Last task (2026-10-23): align with the shipped I2 and S6.
 6. Contract extensions are unchanged, except that the I2 query-shape assumptions were removed from the README
    table; the README now documents what was checked against the real services.
 
+7. I5 alignment (2026-10-23, after I5 added `strategy_id`):
+   - `BacktestRequest` now sends `strategy_id` (the agent-scoped id `agent:strategy`), `actor` `{agent,
+     agent_id}` and `seed`. The seed is taken out of `params`, because I5 strategies forbid extra parameters.
+   - When I5 returns a `trial_id`, the gateway does not log its own linked record (`logged_to: "i5"`), so one
+     backtest counts once in S6.
+   - Refused or failed backtests are logged in I5's family (`ledger.backtest_family_template`,
+     `i5/{strategy}/{universe}`), because S6 counts `n_trials` per family.
+   - The fake I5 logs to the fake S6 the way the shipped I5 does.
+   - New test: `verdict` resolves to the id I5 was given.
+   - The opt-in test now also starts `backtest-orchestrator/.venv/bin/bt serve` against the real I2 and S6, with
+     env `BT_PIT__MODE=http`, `BT_PIT__BARS_SOURCE=trades`, `BT_MARKET__VENUE=binance` and
+     `BT_LEDGER__MODE=http`. It runs `sma_cross`, and checks that S6's verdict for `itest:sma_cross` reports
+     n_trials 2 (the I5 trial and the refused peek), sources `{i5: 1, i9: 1}` and actors `{agent: 2}`.
+     It passed in 5.7 s.
+   - Report counts are unaffected; `make report` was not rerun for this change.
+
 ## Mistakes and lessons
 
 1. I first built the I2 client from guesses: a `filters` dict, `format` as a query parameter, and several response
@@ -102,4 +118,7 @@ Last task (2026-10-23): align with the shipped I2 and S6.
    replayed season found both. Lesson: test every budget with a moving session clock.
 7. The price table was written from memory (Opus at 15/75). Verify prices against a current source and record
    the check date.
-8. Compound shell commands (`cd && ...`) are denied in this environment; use `git -C` and `make -C`.
+8. Before this fix, I5 logged agent backtests under its own id (`i5-<strategy>-<universe>`) and its own actor,
+   so `verdict()` never found them. The gateway also logged a linked duplicate in a different family. Only the
+   real I5 + S6 test showed how S6 groups trials by family.
+9. Compound shell commands (`cd && ...`) are denied in this environment; use `git -C` and `make -C`.

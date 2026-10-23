@@ -16,7 +16,7 @@ cp .env.example .env   # set TRADEQ_DATA_DIR and GATEWAY_ADMIN_API_KEY
 make lint typecheck test
 make reproduce      # offline demo against in-process fakes; prints the audit log
 make report         # experiments behind docs/report.md (about 80 s)
-make test-integration  # opt-in: real I2 and S6 from the sibling repos' .venv (scratch data under tmp/)
+make test-integration  # opt-in: real I2, I5 and S6 from the sibling repos' .venv (scratch data under tmp/)
 make serve          # admin API + MCP over streamable HTTP on 127.0.0.1:8608
 make serve-offline  # the same server wired to the in-process fakes (gateway serve --offline)
 ```
@@ -86,7 +86,7 @@ with `isError: true` and a structured body `{refused: true, code, message, detai
 Consumed: 6.1 (S6 trials, verdicts, leakage events, inbox fallback), 6.3 (I2 queries, 409 leakage guard),
 6.4 (I6 and I7 order API), 6.5 (S1 forecast, I5 backtests, S7 probe).
 
-Checked against the shipped services (`make test-integration`, which passed on 2026-10-23):
+Checked against the shipped services (`make test-integration`, which passed on 2026-10-23 with I2, I5 and S6):
 
 - I2: the gateway sends `POST /v1/query` with `"format": "json"` in the body and typed filters
   (`[{"column": "symbol", "op": "==", "value": ...}]`), and reads `{fingerprint, columns, rows, flags}` with
@@ -99,6 +99,12 @@ Checked against the shipped services (`make test-integration`, which passed on 2
   `block` (`warn` when the clamp policy cut the window), with the S6 inbox as fallback; I2's own 409s are
   reported to S6 by I2. Ledger strategy ids are `<agent_id>:<strategy>`: S6's verdict route cannot match an
   id that contains `/`.
+- I5: `POST /v1/backtests` carries I5's optional `strategy_id` (the agent-scoped ledger id), `actor`
+  (`{"kind": "agent", "id": <agent_id>}`) and `seed` (taken out of `params`, because I5 strategies reject
+  unknown parameters). I5 then logs the run in S6 under that id, so `verdict(strategy)` finds it; the gateway
+  does not log a second record of the same run (`logged_to: "i5"`, `gateway_trial_id` is I5's trial id). Refused
+  or failed backtests, which I5 never sees, are logged by the gateway in I5's family (`i5/<strategy>/<universe>`,
+  setting `ledger.backtest_family_template`), because S6 counts `n_trials` per family.
 
 Extensions (optional fields only):
 
@@ -108,7 +114,7 @@ Extensions (optional fields only):
 | admin API | extra routes: `GET /sessions`, `GET /sessions/{id}`, `POST /sessions/{id}/unfreeze`, `POST /sessions/{id}/close`, `GET /sessions/{id}/audit` |
 | MCP auth | `Authorization: Bearer <session api_key>`, or admin key plus `X-Gateway-Session` |
 | Order API (6.4) | `X-Tradeq-Known-At` request header on orders, positions and accounts when the session has an operator clock |
-| `TrialRecord` from I9 | `source="i9"`, `returns: null`; `params.linked_trial_id` and tag `linked:i5:<id>` point at I5's own trial; refused attempts are logged with tag `refused:<code>` |
+| `TrialRecord` from I9 | `source="i9"`, `returns: null`; only for runs I5 did not log itself (refused or failed), tagged `refused:<code>`; order intents in family `risk-gated-mcp-gateway/<agent>/order-intent/<strategy>` |
 | `verdict` tool | adds the S7 leakage reports, `leakage_status` and `promotable` to the S6 verdict |
 
 ## Key results
@@ -126,7 +132,7 @@ From `make report` (synthetic fakes, laptop; details and method in [docs/report.
 
 ## Limitations and roadmap
 
-Only I2 and S6 have been exercised as real services (opt-in test); I5, S1, S7 and I6 are fakes, and the report
+Only I2, I5 and S6 have been exercised as real services (opt-in test); S1, S7 and I6 are fakes, and the report
 experiments use the fakes throughout. I7 does not exist yet, so live routing is tested against a second fake with
 the Order API. Session state is SQLite with per-process locks; two gateway
 processes serving the same session can interleave updates.
