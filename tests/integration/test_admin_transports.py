@@ -133,8 +133,8 @@ async def test_stdio_transport(harness: Harness, tmp_path: Path, monkeypatch: py
             await client.call_tool(
                 "market_data",
                 {
-                    "venue": "binance",
-                    "symbol": "BTC-USDT-PERP",
+                    "venue": "moex-tbank",
+                    "symbol": "SBER-RUB-TQBR",
                     "channel": "trades",
                     "start": "2025-05-31T23:00:00Z",
                     "end": "2025-06-01T00:00:00Z",
@@ -155,9 +155,13 @@ async def test_demo(settings: Settings) -> None:
     assert outcomes["fat-finger limit order"] == "refused:pre_trade_rejected"
     assert outcomes["token budget breach"] == "refused:budget_breached"
     assert outcomes["tool call after freeze"] == "refused:session_frozen"
+    assert outcomes["market slice (what an RL policy sees)"] == "ok"
+    assert outcomes["trading rules at the broker"] == "ok"
+    assert outcomes["order of a fractional lot"] == "refused:pre_trade_rejected"
     assert result.chain_intact
-    assert result.exchange_orders == 1
-    assert result.ledger_trials == 5
+    assert result.exchange_orders == 0  # paper orders went to the mirror sandbox
+    assert result.mirror_orders == 1
+    assert result.ledger_trials == 6  # refused order intents count too (the fractional lot)
     assert json.loads(Path(result.summary_path).read_text())["audit_chain_intact"]
 
 
@@ -234,11 +238,11 @@ def test_serve_offline_subprocess(tmp_path: Path) -> None:
                     await client.call_tool(
                         "place_order",
                         {
-                            "venue": "binance",
-                            "symbol": "BTC-USDT-PERP",
+                            "venue": "moex-tbank",
+                            "symbol": "SBER-RUB-TQBR",
                             "side": "buy",
                             "type": "market",
-                            "qty": 0.01,
+                            "qty": 10.0,
                             "strategy_id": "s",
                             "rationale": "offline serve",
                         },
@@ -246,8 +250,10 @@ def test_serve_offline_subprocess(tmp_path: Path) -> None:
                 ).data
 
         data = asyncio.run(call())
-        assert data["routed_to"] == "i6"
-        assert data["order"]["price"] == pytest.approx(data["reference_price"])
+        # Paper sessions default to the mirror sandbox, which takes the touch of the fake I2 book.
+        assert data["routed_to"] == "mirror"
+        assert data["order"]["status"] == "filled"
+        assert data["order"]["avg_price"] == pytest.approx(data["reference_price"], rel=1e-3)
     finally:
         proc.terminate()
         proc.wait(timeout=10)

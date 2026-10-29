@@ -37,26 +37,37 @@ LEDGER_BIN = LEDGER_REPO / ".venv" / "bin"
 BT_REPO = WORKSPACE / "backtest-orchestrator"
 BT_BIN = BT_REPO / ".venv" / "bin"
 BT_STRATEGY = "sma_cross"  # registered in I5 (GET /v1/strategies)
-BT_PARAMS = {"fast": 2, "slow": 5, "qty": 0.01, "seed": 3}  # the gateway moves seed to I5's own field
+BT_PARAMS = {"fast": 2, "slow": 5, "qty": 10.0, "seed": 3}  # the gateway moves seed to I5's own field
 STARTUP_TIMEOUT_S = 60.0
 KNOWN_AT = "2025-06-01T00:00:00Z"
 NS = 1_000_000_000
 
-# Runs inside I2's own interpreter (it has pyarrow); writes one I1 tape file per contract 6.2.
+# Runs inside I2's own interpreter (it has pyarrow); writes I1 tape files per contract 6.2 revision 2 (MOEX):
+# one trade per minute, and one order-book snapshot (5 levels per side) just before the last trade.
 TAPE_WRITER = """
 import sys, pyarrow as pa, pyarrow.parquet as pq
 from pathlib import Path
 root, start_ns, n = Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
-out = root / "venue=binance/channel=trades/symbol=BTC-USDT-PERP/date=2025-05-31/part-0.parquet"
+base = root / "venue=moex-tbank"
+def common(k, ts):
+    return {"venue": ["moex-tbank"] * k, "symbol": ["SBER-RUB-TQBR"] * k,
+            "ts_exchange": pa.array(ts, pa.int64()), "ts_local": pa.array([t + 1_000_000_000 for t in ts], pa.int64()),
+            "capture_region": ["test"] * k, "connection_id": ["c1"] * k, "seq": pa.array([None] * k, pa.int64())}
+out = base / "channel=trades/symbol=SBER-RUB-TQBR/date=2025-05-31/part-0.parquet"
 out.parent.mkdir(parents=True, exist_ok=True)
 ts = [start_ns + i * 60_000_000_000 for i in range(n)]
-pq.write_table(pa.table({
-    "venue": ["binance"] * n, "symbol": ["BTC-USDT-PERP"] * n,
-    "ts_exchange": pa.array(ts, pa.int64()), "ts_local": pa.array([t + 1_000_000_000 for t in ts], pa.int64()),
-    "capture_region": ["test"] * n, "connection_id": ["c1"] * n, "seq": pa.array(range(n), pa.int64()),
-    "trade_id": [f"t{i:05d}" for i in range(n)], "price": [60000.0 + i for i in range(n)],
-    "size": [0.01] * n, "side": ["buy" if i % 2 else "sell" for i in range(n)],
-}), out)
+pq.write_table(pa.table({**common(n, ts),
+    "trade_id": [f"t{i:05d}" for i in range(n)], "price": [280.0 + i / 100 for i in range(n)],
+    "size": [10.0] * n, "side": ["buy" if i % 2 else "sell" for i in range(n)]}), out)
+last = ts[-1] - 30_000_000_000
+mid = 280.0 + (n - 1) / 100
+bids = [("bid", round(mid - 0.01 * (k + 1), 2), k) for k in range(5)]
+levels = bids + [("ask", round(mid + 0.01 * k, 2), k) for k in range(5)]
+book = base / "channel=book_snapshot/symbol=SBER-RUB-TQBR/date=2025-05-31/part-0.parquet"
+book.parent.mkdir(parents=True, exist_ok=True)
+pq.write_table(pa.table({**common(10, [last] * 10),
+    "side": [lv[0] for lv in levels], "price": [lv[1] for lv in levels], "size": [100.0] * 10,
+    "level": pa.array([lv[2] for lv in levels], pa.int32()), "snapshot_id": [f"TQBR-{last}"] * 10}), book)
 """
 
 
@@ -111,7 +122,7 @@ def real_services() -> Iterator[RealServices]:
         "BT_PIT__MODE": "http",
         "BT_PIT__BASE_URL": pit_url,
         "BT_PIT__BARS_SOURCE": "trades",
-        "BT_MARKET__VENUE": "binance",
+        "BT_MARKET__VENUE": "moex-tbank",
         "BT_LEDGER__MODE": "http",
         "BT_LEDGER__BASE_URL": ledger_url,
     }
@@ -123,13 +134,14 @@ def real_services() -> Iterator[RealServices]:
         env=env,
         cwd=scratch,
     )
-    subprocess.run(
-        [str(PIT_BIN / "pit"), "ingest", "tape.trades", "--venue", "binance"],
-        check=True,
-        env=env,
-        cwd=scratch,
-        capture_output=True,
-    )
+    for dataset in ("tape.trades", "tape.book_snapshot"):
+        subprocess.run(
+            [str(PIT_BIN / "pit"), "ingest", dataset, "--venue", "moex-tbank"],
+            check=True,
+            env=env,
+            cwd=scratch,
+            capture_output=True,
+        )
     procs: list[subprocess.Popen[bytes]] = []
     try:
         for name, cmd, url in (
@@ -229,14 +241,22 @@ async def test_research_and_paper_session_against_real_i2_and_s6(
             **{k: tape[k] for k in ("venue", "symbol")},
             side="buy",
             type="market",
-            qty=0.01,
+            qty=10.0,
             strategy_id=BT_STRATEGY,
             rationale="integration test",
         )
         assert not order.is_error, order.data
-        assert order.data["reference_price"] == 60000.0 + 119
+        assert order.data["reference_price"] == pytest.approx(280.0 + 119 / 100)
         assert order.data["logged_to"] == "ledger"
-    assert len(h.platform.exchange.received) == 1
+        # The mirror sandbox matched against the order book stored in the real I2: the best ask at the clock.
+        assert order.data["routed_to"] == "mirror"
+        assert order.data["order"]["avg_price"] == pytest.approx(280.0 + 119 / 100)
+        sl = await agent.call("market_slice", symbols=["SBER-RUB-TQBR"])
+        assert not sl.is_error, sl.data
+        (inst,) = sl.data["slice"]["instruments"]
+        assert inst["best_ask"] == pytest.approx(281.19)
+        assert inst["last_price"] == pytest.approx(281.19)
+    assert len(h.platform.exchange.received) == 0
     inbox = real_services.data_dir / "research-ledger" / "inbox"
     assert not list(inbox.glob("i9-*.jsonl")) if inbox.exists() else True
     await h.gateway.downstream.aclose()

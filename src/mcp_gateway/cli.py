@@ -83,7 +83,8 @@ def reproduce() -> None:
     for entry in result.audit:
         typer.echo("  " + audit_line(entry))
     typer.echo(
-        f"\nTrials received by fake S6: {result.ledger_trials}; orders received by fake I6: {result.exchange_orders}"
+        f"\nTrials received by fake S6: {result.ledger_trials}; orders received by fake I6: {result.exchange_orders}; "
+        f"orders matched by the mirror sandbox: {result.mirror_orders}"
     )
     typer.echo(f"Summary written to {result.summary_path}")
 

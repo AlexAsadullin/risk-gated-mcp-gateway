@@ -95,6 +95,7 @@ class Session(BaseModel):
     created_at_ns: int
     api_key_hash: str
     usage: Usage = Field(default_factory=Usage)
+    broker: str | None = None  # contract 6.8 adapter; None = the mode's default (sessions before 2026-10-29)
 
 
 def generate_api_key(n_bytes: int) -> str:

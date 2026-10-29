@@ -1,6 +1,7 @@
 # HANDOVER: risk-gated-mcp-gateway (Tradeq I9)
 
-Last updated 2026-10-23 by the orchestrating session. It was written from the finishing agent's final report and
+Last updated 2026-10-30 by the session that did the MOEX pivot (section "MOEX pivot" at the end overrides older
+text where they disagree). Earlier update: 2026-10-23 by the orchestrating session. It was written from the finishing agent's final report and
 from the repository.
 
 ## Goal
@@ -122,3 +123,45 @@ Last task (2026-10-23): align with the shipped I2 and S6.
    so `verdict()` never found them. The gateway also logged a linked duplicate in a different family. Only the
    real I5 + S6 test showed how S6 groups trials by family.
 9. Compound shell commands (`cd && ...`) are denied in this environment; use `git -C` and `make -C`.
+
+## MOEX pivot (2026-10-29/30)
+
+The user asked for a gateway that is not bound to an exchange, with a sandbox behind MCP that duplicates the real
+market first, and terminals of other exchanges later. Brief: `../prompts/08-risk-gated-mcp-gateway.md`
+revision 2; contracts 6.6 (revision 2), 6.7 and 6.8 in `../prompts/00-platform-conventions.md`.
+
+What changed:
+1. `brokers/`: `base.py` (`BrokerAdapter`, `InstrumentRules`, `ConfiguredRules`, `HttpOrderBroker` around the
+   6.4 `OrderClient`, errors `OrderNotFound` and `BrokerUnavailable`), `mirror.py` (`MirrorBroker` and
+   `PitMarketSource`), `tbank_sandbox.py` (`TBankSandboxBroker`, REST `SandboxService` + `ShareBy`), `router.py`
+   (`BrokerRouter`, built in `app.build_gateway`, closed in the app lifespan).
+2. `gateway.py`: `_order_client` replaced by `_broker(session)`; place, cancel, positions and account go through
+   the adapter inside `refusing_downstream()`, which now maps `OrderNotFound` and `BrokerUnavailable`;
+   `instrument_checks` run with the other pre-trade checks; new tools `instrument` and `market_slice`
+   (`PitClient.slice`, I2 `GET /v1/slice` at the session clock).
+3. Sessions carry `broker` (None for old sessions = the mode's default); `CreateSessionRequest.broker` is checked
+   by `BrokerRouter.check_choice` (422 `invalid_broker`).
+4. Config: MOEX whitelist and rouble limits, `risk.require_instrument_rules`, `brokers.*` (paper default
+   `mirror`), `storage.brokers_dir`, fake world on SBER/GAZP/LKOH with a fake I2 order book (`fakes.book_*`) and
+   a fake `/v1/slice`. `.env` is loaded into the environment for `TBANK_TOKEN`.
+5. Order fill details are `filled_qty`, `avg_price` and `fee` (the names S8 already reads).
+6. Tests: `tests/unit/test_brokers.py` (mirror matching rules with a scripted market, T-Bank adapter with respx,
+   router), mirror end-to-end tests in `tests/integration/test_tools.py`; the older paper tests now create
+   sessions with `broker="shadow"`, because they inspect the I6 fake. The report benchmark (`bench/`) also uses
+   `broker="shadow"` and whole-share quantities; `make report` was not rerun, so `docs/report.md` keeps the
+   2026-10-22/23 numbers from the crypto world.
+7. Sibling changes made for the real-service tests: I5 got MOEX instruments in its config; S8's I9 season moved
+   to MOEX with lot rounding (both committed in their repositories).
+
+State: lint, mypy clean; 90 default tests pass with 97% coverage; `make test-integration` (real I2, I5, S6) passed
+on 2026-10-30, including a mirror fill against a book stored in the real I2; S8's `make integration` against this
+gateway passed (193 fills). `make reproduce` shows the market slice, the instrument rules, a refused fractional
+lot and a mirror fill.
+
+Open items: first T-Bank sandbox run with a real token; rerun `make report` on the MOEX fakes; a mirror mode
+that reads the live I1 stream directly (sub-second) instead of I2 queries; I7 adapter once I7 exists.
+
+Lessons:
+1. Changing a default broker changes what every downstream consumer sees (S8 asserted fills at the reference
+   price). Run the consumers' integration tests (S8 `make integration`) after any change of I9 defaults.
+2. Old tests that inspect a specific fake should name their broker explicitly instead of relying on a default.

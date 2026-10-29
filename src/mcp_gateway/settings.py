@@ -12,6 +12,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
+from dotenv import load_dotenv
 from pydantic import AliasChoices, BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import (
     BaseSettings,
@@ -71,6 +72,7 @@ class StorageSettings(BaseModel):
     audit_file_prefix: str
     demo_dir: str
     reports_dir: str
+    brokers_dir: str
 
 
 class ServiceEndpoint(BaseModel):
@@ -229,7 +231,64 @@ class RiskSettings(BaseModel):
     max_position_notional: float = Field(gt=0)
     price_band_bps: float = Field(gt=0)
     require_reference_price: bool
+    require_instrument_rules: bool
     reference: ReferencePriceSettings
+
+
+class InstrumentRule(BaseModel):
+    """Trading rules of one instrument (contract 6.8 ``InstrumentRules``), used when a broker has no live source.
+
+    ``price_band_bps`` is the daily price band around the reference price (MOEX limits orders outside it).
+    """
+
+    venue: str
+    symbol: str
+    lot_size: float = Field(gt=0)
+    tick: float = Field(gt=0)
+    currency: str
+    price_band_bps: float | None = Field(default=None, gt=0)
+
+
+class MirrorSettings(BaseModel):
+    """The built-in sandbox that matches orders against the real order book read from I2 (contract 6.8)."""
+
+    initial_cash: float = Field(gt=0)
+    currency: str
+    taker_fee_bps: float = Field(ge=0)
+    maker_fee_bps: float = Field(ge=0)
+    book_dataset: str
+    trades_dataset: str
+    book_lookback_s: float = Field(gt=0)
+    max_book_age_s: float = Field(gt=0)
+    state_file: str
+
+
+class TBankSandboxSettings(BaseModel):
+    """T-Bank Invest API sandbox over its REST proxy; the token comes only from ``token_env``."""
+
+    base_url: str
+    service_prefix: str
+    token_env: str
+    timeout_s: float = Field(gt=0)
+    initial_pay_in: float = Field(gt=0)
+    currency: str
+    state_file: str
+
+
+class BrokerSettings(BaseModel):
+    """Contract 6.8: which execution adapter serves which mode, and the instruments' trading rules.
+
+    ``paper`` and ``live`` name the default adapter of each mode; a session may name another one in
+    ``allowed_paper`` when it is created. Adapter names: ``mirror``, ``shadow`` (I6), ``execution`` (I7),
+    ``tbank-sandbox``.
+    """
+
+    paper: str
+    live: str
+    allowed_paper: list[str]
+    instruments: list[InstrumentRule]
+    mirror: MirrorSettings
+    tbank_sandbox: TBankSandboxSettings
 
 
 class OrderSettings(BaseModel):
@@ -247,6 +306,9 @@ class FakeSettings(BaseModel):
     cycle_bars: int = Field(gt=0)
     noise_scale: float = Field(ge=0)
     base_prices: dict[str, float]
+    book_levels: int = Field(gt=0)
+    book_level_size: float = Field(gt=0)
+    book_ticks: dict[str, float]
     initial_cash: float = Field(gt=0)
     currency: str
     flagged_models: list[str]
@@ -299,6 +361,7 @@ class Settings(BaseSettings):
     pricing: PricingSettings
     risk: RiskSettings
     orders: OrderSettings
+    brokers: BrokerSettings
     fakes: FakeSettings
     demo: DemoSettings
 
@@ -328,6 +391,11 @@ class Settings(BaseSettings):
         return self.project_dir / self.storage.audit_dir
 
     @property
+    def broker_state_dir(self) -> Path:
+        """Where broker adapters keep their state (mirror accounts, T-Bank sandbox account map)."""
+        return self.project_dir / self.storage.brokers_dir
+
+    @property
     def demo_dir(self) -> Path:
         return self.project_dir / self.storage.demo_dir
 
@@ -342,5 +410,10 @@ class Settings(BaseSettings):
 
 
 def load_settings(**overrides: object) -> Settings:
-    """Load settings from YAML + env, with optional keyword overrides (used by tests and the demo)."""
+    """Load settings from YAML + env, with optional keyword overrides (used by tests and the demo).
+
+    ``.env`` is also loaded into the process environment (without overriding it), because broker tokens such as
+    ``TBANK_TOKEN`` are read from the variable named by ``token_env``, not from a settings field.
+    """
+    load_dotenv(".env", override=False)
     return Settings(**overrides)  # type: ignore[arg-type]

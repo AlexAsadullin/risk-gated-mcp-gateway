@@ -8,6 +8,16 @@ adversarial episodes the gateway blocked 1,225 of 1,225 policy violations (Wilso
 0 of 2,686 false refusals, while an unguarded pass-through baseline blocked none and returned 11,620 rows from
 after the session clock. Specification: `quant_platform_plan_full.md`, project I9.
 
+Since 2026-10-29 the gateway targets MOEX and is not bound to any exchange. Every order and account call goes
+through one broker-adapter protocol (contract 6.8), chosen per session. The default for paper sessions is the
+built-in **mirror sandbox**: it reads the real MOEX order book and trade tape from I2 at the session clock and
+matches the agent's orders against them (walking the book, queue position for resting orders, lots, ticks and
+fees), so agents and RL policies trade a copy of the live market, or a replayed day, with no broker. The T-Bank
+sandbox and the I6 shadow exchange are the other paper adapters, and I7 serves live. Two tools were added:
+`market_slice` (contract 6.7, the same observation an RL policy and the terminal see) and `instrument` (the
+broker's trading rules). The benchmark numbers below come from v0.1 sessions on the I6 fake, which the
+benchmark still uses explicitly.
+
 ## Quickstart
 
 ```bash
@@ -65,10 +75,29 @@ known at that time, which is the price the gateway's reference-price check reads
 
 ```
 MCP client --stdio / streamable HTTP--> mcp_server.py --+
-admin client --HTTP--> admin.py ------------------------+--> gateway.py --> clients/ --> S6 I2 S1 I5 S7 I6 I7
+admin client --HTTP--> admin.py ------------------------+--> gateway.py --> clients/ --> S6 I2 S1 I5 S7
                                                           |    timetravel.py  risk.py  budgets.py  trials.py
+                                                          |    brokers/router.py --> mirror (I2 book) | shadow (I6)
+                                                          |                          tbank-sandbox    | execution (I7)
                                                           +--> sessions.py (SQLite)   audit.py (hash-chained JSONL)
 ```
+
+Brokers (contract 6.8, `brokers/`): `base.py` defines `BrokerAdapter` (place, get, cancel, account, positions,
+instrument) and `InstrumentRules`; `router.py` picks the session's adapter (`brokers.paper`, `brokers.live`,
+`brokers.allowed_paper`; a session may name one at creation with `broker`). A new exchange or terminal is one new
+adapter class and one config entry; the tools, budgets and risk checks do not change.
+
+- `mirror.py`: the market-mirroring sandbox. Market and IOC/FOK orders walk the latest I2 book known at the clock
+  (liquidity taken from one snapshot is remembered, so two orders cannot take the same shares); GTC limits rest
+  behind the displayed size at their price and fill when later trades exhaust that queue or trade through the
+  price; POST_ONLY that would trade is rejected. Rouble accounts with taker and maker fees; equity marked at the
+  mid. State persists in `$TRADEQ_DATA_DIR/risk-gated-mcp-gateway/brokers/mirror-state.json`.
+- `tbank_sandbox.py`: T-Bank Invest API `SandboxService` over the REST proxy (token from `TBANK_TOKEN`); opens and
+  funds one sandbox account per gateway account, resolves symbols with `ShareBy`, converts shares to lots. The
+  T-Bank sandbox fills by its own idealised rules, so it is an integration target, not a fill model.
+
+Pre-trade checks gained the exchange rules (`risk.instrument_checks`): whole lots, price on the tick, inside the
+daily price band, instrument tradable; `risk.require_instrument_rules` refuses instruments without rules.
 
 `gateway.py` holds all policy and is transport-free. Every tool call is authenticated, serialised per session,
 checked against the frozen state, and written to the audit log, where each entry carries the SHA-256 of the
@@ -79,12 +108,18 @@ and, only when S6 is unreachable, `$TRADEQ_DATA_DIR/research-ledger/inbox/i9-<yy
 ## Contracts
 
 Produced: 6.6 (conventions section 6.6). Tools: `clock`, `market_data`, `features`, `forecast`, `run_backtest`,
-`verdict`, `place_order`, `cancel_order`, `positions`, `account`, `budget`, `report_usage`. No tool takes
+`verdict`, `place_order`, `cancel_order`, `positions`, `account`, `budget`, `report_usage`, and since revision 2
+`market_slice` and `instrument`. Contract 6.8 (broker adapter) is implemented here. No tool takes
 `known_at`. Success results carry `structuredContent` that matches the tool's `outputSchema`; refusals come back
 with `isError: true` and a structured body `{refused: true, code, message, details, session_status}`.
 
 Consumed: 6.1 (S6 trials, verdicts, leakage events, inbox fallback), 6.3 (I2 queries, 409 leakage guard),
-6.4 (I6 and I7 order API), 6.5 (S1 forecast, I5 backtests, S7 probe).
+6.4 (I6 and I7 order API), 6.5 (S1 forecast, I5 backtests, S7 probe), 6.7 (I2 market slice), and the T-Bank
+Invest API sandbox (`../docs/moex-sources.md`).
+
+The opt-in test against the real I2, I5 and S6 (`make test-integration`, passed 2026-10-30) seeds I2 with a MOEX
+tape (trades and one order-book snapshot), and checks that a paper order filled by the mirror at the best ask
+stored in the real I2, and that `market_slice` returns the real I2 slice.
 
 Checked against the shipped services (`make test-integration`, which passed on 2026-10-23 with I2, I5 and S6):
 
@@ -116,6 +151,8 @@ Extensions (optional fields only):
 | Order API (6.4) | `X-Tradeq-Known-At` request header on orders, positions and accounts when the session has an operator clock |
 | `TrialRecord` from I9 | `source="i9"`, `returns: null`; only for runs I5 did not log itself (refused or failed), tagged `refused:<code>`; order intents in family `risk-gated-mcp-gateway/<agent>/order-intent/<strategy>` |
 | `verdict` tool | adds the S7 leakage reports, `leakage_status` and `promotable` to the S6 verdict |
+| `POST /admin/v1/sessions` | optional `broker` (one of `brokers.allowed_paper`); the session view reports it |
+| `place_order` result | `routed_to` is the adapter label (`mirror`, `i6`, `i7`, `tbank-sandbox`); mirror and T-Bank orders add `filled_qty`, `avg_price`, `fee`, `account_id`, `broker` |
 
 ## Key results
 
@@ -133,7 +170,10 @@ From `make report` (synthetic fakes, laptop; details and method in [docs/report.
 ## Limitations and roadmap
 
 Only I2, I5 and S6 have been exercised as real services (opt-in test); S1, S7 and I6 are fakes, and the report
-experiments use the fakes throughout. I7 does not exist yet, so live routing is tested against a second fake with
+experiments use the fakes throughout. The T-Bank sandbox adapter is tested against a mocked REST proxy only,
+because no token exists yet. The mirror does not move the market (its own orders have no impact beyond the
+liquidity they take from one snapshot), and AlgoPack books are polled snapshots, so queue position between two
+snapshots is an estimate from the trade tape. I7 does not exist yet, so live routing is tested against a second fake with
 the Order API. Session state is SQLite with per-process locks; two gateway
 processes serving the same session can interleave updates.
 

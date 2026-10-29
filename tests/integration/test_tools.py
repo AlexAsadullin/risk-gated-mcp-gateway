@@ -34,7 +34,7 @@ def order(h: Harness, **kw: Any) -> dict[str, Any]:
         "symbol": d.symbol,
         "side": "buy",
         "type": "market",
-        "qty": 0.01,
+        "qty": 10.0,
         "strategy_id": "mom",
         "rationale": "test",
     }
@@ -46,7 +46,8 @@ async def research(h: Harness) -> dict[str, Any]:
 
 
 async def paper(h: Harness, **budgets: Any) -> dict[str, Any]:
-    return await h.create_session(agent_id="ag", mode="paper", known_at=None, budgets=budgets)
+    """A paper session on the I6 fake, whose bookkeeping these tests inspect; the mirror has its own tests."""
+    return await h.create_session(agent_id="ag", mode="paper", known_at=None, budgets=budgets, broker="shadow")
 
 
 async def test_tool_list_matches_contract(harness: Harness) -> None:
@@ -95,13 +96,13 @@ async def test_research_flow(harness: Harness) -> None:
         feats = await a.call(
             "features",
             names=["ret_1h"],
-            symbols=["BTC-USDT-PERP"],
+            symbols=["SBER-RUB-TQBR"],
             start=window(harness)["start"],
             end=window(harness)["end"],
         )
         assert not feats.is_error
         assert "ret_1h" in feats.data["rows"][0]
-        fc = await a.call("forecast", model="m", symbols=["BTC-USDT-PERP"], horizon=4)
+        fc = await a.call("forecast", model="m", symbols=["SBER-RUB-TQBR"], horizon=4)
         assert fc.data["known_at"] == "2025-06-01T00:00:00Z"
         assert set(fc.data["forecasts"][0]["quantiles"]) == {
             "0.1",
@@ -113,7 +114,7 @@ async def test_research_flow(harness: Harness) -> None:
             "run_backtest",
             strategy="mom",
             params={"seed": 3},
-            universe=["BTC-USDT-PERP"],
+            universe=["SBER-RUB-TQBR"],
             start="2025-05-01",
             end="2025-06-01",
             fidelity="event",
@@ -126,7 +127,7 @@ async def test_research_flow(harness: Harness) -> None:
             "run_backtest",
             strategy="mom",
             params={},
-            universe=["BTC-USDT-PERP"],
+            universe=["SBER-RUB-TQBR"],
             start="2025-05-01",
             end="2025-06-02",
             fidelity="event",
@@ -192,13 +193,13 @@ async def test_paper_orders_checks_and_budgets(harness: Harness) -> None:
         assert ok.data["routed_to"] == "i6"
         assert ok.data["order"]["status"] == "filled"
         ref = ok.data["reference_price"]
-        fat = await a.call("place_order", **order(harness, type="limit", price=ref * 1.2))
+        fat = await a.call("place_order", **order(harness, type="limit", price=round(ref * 1.05, 2)))
         assert fat.code == "pre_trade_rejected"
         failed = {c["name"] for c in fat.data["details"]["checks"] if not c["passed"]}
         assert failed == {"price_band_bps"}
         assert (await a.call("place_order", **order(harness, type="limit"))).code == "pre_trade_rejected"
         assert (await a.call("place_order", **order(harness, venue="kraken"))).code == "pre_trade_rejected"
-        big = await a.call("place_order", **order(harness, qty=0.2))
+        big = await a.call("place_order", **order(harness, qty=5000.0))
         assert big.code == "budget_breached"
         assert big.data["session_status"] == "active"
         rest = await a.call("place_order", **order(harness, type="limit", price=round(ref * 0.995, 2)))
@@ -212,7 +213,7 @@ async def test_paper_orders_checks_and_budgets(harness: Harness) -> None:
         harness.clock.advance(61)
         assert not (await a.call("place_order", **order(harness))).is_error
         pos = await a.call("positions")
-        assert pos.data["positions"][0]["qty"] == pytest.approx(0.02)
+        assert pos.data["positions"][0]["qty"] == pytest.approx(20.0)
         acct = await a.call("account")
         assert acct.data["drawdown"] == pytest.approx(0.0, abs=1e-3)
         budget = await a.call("budget")
@@ -224,8 +225,8 @@ async def test_paper_orders_checks_and_budgets(harness: Harness) -> None:
 
 
 async def test_cancel_other_account_is_not_found(harness: Harness) -> None:
-    first = await harness.create_session(agent_id="one", mode="paper")
-    second = await harness.create_session(agent_id="two", mode="paper")
+    first = await harness.create_session(agent_id="one", mode="paper", broker="shadow")
+    second = await harness.create_session(agent_id="two", mode="paper", broker="shadow")
     async with harness.agent(first["api_key"]) as a:
         ref = (await a.call("place_order", **order(harness))).data["reference_price"]
         rest = await a.call("place_order", **order(harness, type="limit", price=round(ref * 0.995, 2)))
@@ -246,7 +247,7 @@ async def test_drawdown_freezes(harness: Harness) -> None:
     s = await paper(harness)
     async with harness.agent(s["api_key"]) as a:
         for _ in range(4):
-            assert not (await a.call("place_order", **order(harness, qty=0.15))).is_error
+            assert not (await a.call("place_order", **order(harness, qty=3400.0))).is_error
         harness.platform.exchange.mark_shock[harness.settings.demo.symbol] = 0.7
         out = await a.call("account")
         assert out.code == "budget_breached"
@@ -290,7 +291,7 @@ async def test_verdict_with_leakage_audit(harness: Harness) -> None:
             "run_backtest",
             strategy="mom",
             params={},
-            universe=["BTC-USDT-PERP"],
+            universe=["SBER-RUB-TQBR"],
             start="2025-05-01",
             end="2025-06-01",
             fidelity="event",
@@ -304,7 +305,7 @@ async def test_verdict_with_leakage_audit(harness: Harness) -> None:
     assert not flagged.data["promotable"]
     report = flagged.data["leakage_reports"][0]
     assert report["model_id"] == "leaky-llm"
-    assert report["cells"][0]["entity"] == "BTC"
+    assert report["cells"][0]["entity"] == "SBER"
     assert harness.platform.ledger.leakage[0].source == "s7"
     assert harness.platform.ledger.leakage[0].strategy_id == "ag:mom"
 
@@ -317,7 +318,7 @@ async def test_downstream_outages(settings: Settings) -> None:
             "run_backtest",
             strategy="mom",
             params={},
-            universe=["BTC-USDT-PERP"],
+            universe=["SBER-RUB-TQBR"],
             start="2025-05-01",
             end="2025-06-01",
             fidelity="event",
@@ -341,7 +342,7 @@ async def test_not_audited_when_probe_down(settings: Settings) -> None:
             "run_backtest",
             strategy="mom",
             params={},
-            universe=["BTC-USDT-PERP"],
+            universe=["SBER-RUB-TQBR"],
             start="2025-05-01",
             end="2025-06-01",
             fidelity="event",
@@ -371,7 +372,7 @@ async def test_live_mode_gate(settings: Settings) -> None:
                 "run_backtest",
                 strategy="mom",
                 params={},
-                universe=["BTC-USDT-PERP"],
+                universe=["SBER-RUB-TQBR"],
                 start="2025-05-01",
                 end="2025-06-01",
                 fidelity="event",
@@ -418,7 +419,9 @@ async def test_agent_connection_is_reusable(harness: Harness) -> None:
 async def test_order_rate_window_runs_on_session_clock(harness: Harness) -> None:
     """A replayed paper episode moves the session clock, not the wall clock; the rate window must follow it."""
     known = harness.settings.demo.known_at
-    s = await harness.create_session(agent_id="ag", mode="paper", known_at=known, budgets={"max_orders_per_window": 2})
+    s = await harness.create_session(
+        agent_id="ag", mode="paper", known_at=known, budgets={"max_orders_per_window": 2}, broker="shadow"
+    )
     async with harness.agent(s["api_key"]) as a:
         assert not (await a.call("place_order", **order(harness))).is_error
         assert not (await a.call("place_order", **order(harness, side="sell"))).is_error
@@ -436,7 +439,7 @@ async def test_paper_fills_at_session_clock_price(harness: Harness) -> None:
     known = parse_iso(harness.settings.demo.known_at)
     world = harness.platform.world
     symbol = harness.settings.demo.symbol
-    s = await harness.create_session(agent_id="ag", mode="paper", known_at=to_iso(known))
+    s = await harness.create_session(agent_id="ag", mode="paper", known_at=to_iso(known), broker="shadow")
     async with harness.agent(s["api_key"]) as a:
         first = await a.call("place_order", **order(harness))
         await harness.set_clock(s["session_id"], to_iso(known + timedelta(hours=1)))
@@ -457,7 +460,7 @@ async def test_verdict_resolves_the_strategy_id_given_to_i5(harness: Harness) ->
             "run_backtest",
             strategy="mom",
             params={"seed": 7},
-            universe=["BTC-USDT-PERP"],
+            universe=["SBER-RUB-TQBR"],
             start="2025-05-01",
             end="2025-06-01",
             fidelity="event",
@@ -475,3 +478,58 @@ async def test_verdict_resolves_the_strategy_id_given_to_i5(harness: Harness) ->
     assert verdict.data["verdict"]["n_trials"] == 1
     logged = [t for t in harness.platform.ledger.trials if t.strategy_id == sent.strategy_id]
     assert [t.trial_id for t in logged] == [bt.data["backtest_trial_id"]]
+
+
+async def test_default_paper_broker_is_the_mirror_of_the_real_book(harness: Harness) -> None:
+    """Contract 6.8: paper sessions trade a copy of the market read from I2, not a broker."""
+    known = harness.settings.demo.known_at
+    s = await harness.create_session(agent_id="mir", mode="paper", known_at=known)
+    assert s["broker"] == "mirror"
+    async with harness.agent(s["api_key"]) as a:
+        sl = await a.call("market_slice", symbols=[harness.settings.demo.symbol])
+        inst = sl.data["slice"]["instruments"][0]
+        assert sl.data["known_at"] == known
+        assert inst["best_ask"] > inst["best_bid"]
+        rules = await a.call("instrument", venue=harness.settings.demo.venue, symbol=harness.settings.demo.symbol)
+        assert rules.data["broker"] == "mirror"
+        assert rules.data["rules"]["lot_size"] == 1.0
+        out = await a.call("place_order", **order(harness, qty=10.0))
+        assert out.data["routed_to"] == "mirror"
+        assert out.data["order"]["status"] == "filled"
+        assert out.data["order"]["avg_price"] == pytest.approx(inst["best_ask"])  # took the touch
+        fraction = await a.call("place_order", **order(harness, qty=0.5))
+        failed = {c["name"] for c in fraction.data["details"]["checks"] if not c["passed"]}
+        assert fraction.code == "pre_trade_rejected"
+        assert failed == {"qty_whole_lots"}
+        off_tick = await a.call("place_order", **order(harness, type="limit", price=round(inst["best_bid"], 2) + 0.005))
+        assert {c["name"] for c in off_tick.data["details"]["checks"] if not c["passed"]} == {"price_on_tick"}
+        rest = await a.call("place_order", **order(harness, type="limit", price=round(inst["best_bid"] - 0.5, 2)))
+        assert rest.data["order"]["status"] == "accepted"
+        assert (await a.call("cancel_order", order_id=rest.data["order"]["order_id"])).data["order"]["status"] == (
+            "cancelled"
+        )
+        assert (await a.call("cancel_order", order_id="mir-none")).code == "not_found"
+        pos = await a.call("positions")
+        assert pos.data["positions"][0]["qty"] == 10.0
+        acct = await a.call("account")
+        assert acct.data["account"]["currency"] == "RUB"
+    assert len(harness.platform.exchange.received) == 0  # nothing went to I6
+
+
+async def test_session_broker_choice_is_validated(harness: Harness) -> None:
+    async with harness.admin_client() as client:
+        prefix = harness.settings.server.admin_prefix
+        bad = await client.post(f"{prefix}/sessions", json={"agent_id": "x", "mode": "paper", "broker": "execution"})
+        assert bad.status_code == 422
+        assert bad.json()["code"] == "invalid_broker"
+
+
+async def test_tbank_sandbox_without_token_is_a_structured_refusal(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TBANK_TOKEN", raising=False)
+    s = await harness.create_session(agent_id="tb", mode="paper", broker="tbank-sandbox")
+    async with harness.agent(s["api_key"]) as a:
+        out = await a.call("instrument", venue="moex-tbank", symbol="SBER-RUB-TQBR")
+    assert out.code == "downstream_unavailable"
+    assert "TBANK_TOKEN" in out.data["message"]

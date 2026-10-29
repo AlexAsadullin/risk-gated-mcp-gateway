@@ -15,12 +15,13 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mcp_gateway.admin import admin_rejection_handler, build_admin_router
 from mcp_gateway.audit import AuditLog
+from mcp_gateway.brokers.router import BrokerRouter
 from mcp_gateway.downstream import Downstream, build_downstream
 from mcp_gateway.gateway import AdminRejection, Gateway
 from mcp_gateway.mcp_server import CredentialSource, build_mcp_server, header_credentials
 from mcp_gateway.sessions import SessionStore
 from mcp_gateway.settings import Settings
-from mcp_gateway.timeutil import Clock, SystemClock
+from mcp_gateway.timeutil import Clock, SystemClock, to_ns
 from mcp_gateway.trials import TrialLogger
 
 
@@ -32,6 +33,8 @@ def build_gateway(
 ) -> Gateway:
     clock = clock or SystemClock()
     downstream: Downstream = build_downstream(settings.services, transports)
+    gateway_clock = clock
+    brokers = BrokerRouter(settings.brokers, downstream, settings.broker_state_dir, lambda: to_ns(gateway_clock.now()))
     return Gateway(
         settings=settings,
         store=SessionStore(settings.sessions_db_path),
@@ -39,6 +42,7 @@ def build_gateway(
         downstream=downstream,
         trials=TrialLogger(downstream.ledger, settings.ledger, settings.ledger_inbox_dir, clock),
         clock=clock,
+        brokers=brokers,
     )
 
 
@@ -98,6 +102,7 @@ def build_http_app(
         async with mcp.session_manager.run():
             yield
         if owns_gateway:
+            await gateway.brokers.aclose()
             await gateway.downstream.aclose()
 
     app = FastAPI(title="Tradeq risk-gated MCP gateway", version="0.1.0", lifespan=lifespan)

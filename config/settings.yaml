@@ -26,6 +26,7 @@ storage:
   audit_file_prefix: audit
   demo_dir: demo
   reports_dir: reports
+  brokers_dir: brokers         # broker adapter state (mirror sandbox, T-Bank sandbox account map)
 
 services:
   ledger: { base_url: "http://127.0.0.1:8601", timeout_s: 5.0 }
@@ -80,16 +81,16 @@ backtest:
 
 leakage:
   languages: [en]
-  # Entities sent to S7 are the base asset of each normalised symbol (BTC-USDT-PERP -> BTC).
+  # Entities sent to S7 are the base asset of each normalised symbol (SBER-RUB-TQBR -> SBER).
   entity_separator: "-"
   default_window_days: 365
   flag_event_kind: llm_memorisation
 
 budgets:
-  defaults:
-    capital: 100000.0
+  defaults:                      # roubles (MOEX)
+    capital: 5000000.0
     max_drawdown: 0.10
-    max_order_notional: 10000.0
+    max_order_notional: 1000000.0
     max_orders_per_window: 10
     order_window_s: 60.0
     max_tokens: 2000000
@@ -122,16 +123,17 @@ pricing:
     scripted-llm: { input_per_mtok_usd: 1.0, output_per_mtok_usd: 2.0 }
   unknown_model_policy: default
 
+# MOEX only (spec revision 2026-10-29). Notional limits are in roubles.
 risk:
   whitelist:
-    - { venue: binance, symbol: BTC-USDT-PERP }
-    - { venue: binance, symbol: ETH-USDT-PERP }
-    - { venue: binance, symbol: SOL-USDT-PERP }
-    - { venue: bybit, symbol: BTC-USDT-PERP }
-  max_order_notional: 25000.0
-  max_position_notional: 50000.0
-  price_band_bps: 200.0
+    - { venue: moex-tbank, symbol: SBER-RUB-TQBR }
+    - { venue: moex-tbank, symbol: GAZP-RUB-TQBR }
+    - { venue: moex-tbank, symbol: LKOH-RUB-TQBR }
+  max_order_notional: 2000000.0
+  max_position_notional: 4000000.0
+  price_band_bps: 200.0          # fat-finger band around the last known trade
   require_reference_price: true
+  require_instrument_rules: true  # refuse orders for instruments without lot/tick rules
   reference:
     channel: trades
     lookback_s: 3600.0
@@ -141,6 +143,34 @@ orders:
   account_id_template: "agent-{agent_id}"
   default_time_in_force: GTC
 
+# Contract 6.8: execution adapters. The gateway is not bound to an exchange; a new venue is a new adapter.
+brokers:
+  paper: mirror                  # paper sessions trade a copy of the real market by default
+  live: execution                # I7 (contract 6.4); live is disabled in modes.live_enabled
+  allowed_paper: [mirror, shadow, tbank-sandbox]
+  instruments:                   # lot and tick from the MOEX securities table; checked live by I1 and T-Bank
+    - { venue: moex-tbank, symbol: SBER-RUB-TQBR, lot_size: 1, tick: 0.01, currency: RUB, price_band_bps: 2000 }
+    - { venue: moex-tbank, symbol: GAZP-RUB-TQBR, lot_size: 10, tick: 0.01, currency: RUB, price_band_bps: 2000 }
+    - { venue: moex-tbank, symbol: LKOH-RUB-TQBR, lot_size: 1, tick: 0.5, currency: RUB, price_band_bps: 2000 }
+  mirror:
+    initial_cash: 10000000.0     # roubles per new account
+    currency: RUB
+    taker_fee_bps: 4.0           # broker plus exchange fee, a typical retail tariff
+    maker_fee_bps: 4.0
+    book_dataset: tape.book_snapshot
+    trades_dataset: tape.trades
+    book_lookback_s: 3600.0
+    max_book_age_s: 600.0        # no book newer than this -> the order is rejected (no_market_data)
+    state_file: mirror-state.json
+  tbank_sandbox:
+    base_url: "https://sandbox-invest-public-api.tbank.ru/rest/"
+    service_prefix: tinkoff.public.invest.api.contract.v1
+    token_env: TBANK_TOKEN
+    timeout_s: 10.0
+    initial_pay_in: 10000000.0
+    currency: RUB
+    state_file: tbank-sandbox-state.json
+
 # In-process fakes of the downstream services (tests, make reproduce, make report). Synthetic, not market data.
 fakes:
   seed: 7
@@ -149,17 +179,20 @@ fakes:
   cycle_amplitude: 0.02
   cycle_bars: 720
   noise_scale: 0.001
-  base_prices: { BTC-USDT-PERP: 60000.0, ETH-USDT-PERP: 3000.0, SOL-USDT-PERP: 150.0 }
-  initial_cash: 100000.0
-  currency: USDT
+  base_prices: { SBER-RUB-TQBR: 285.0, GAZP-RUB-TQBR: 130.0, LKOH-RUB-TQBR: 6900.0 }
+  book_levels: 5                 # fake I2 order book: levels per side, shares at level k = size * (k + 1)
+  book_level_size: 1000.0
+  book_ticks: { SBER-RUB-TQBR: 0.01, GAZP-RUB-TQBR: 0.01, LKOH-RUB-TQBR: 0.5 }
+  initial_cash: 10000000.0
+  currency: RUB
   flagged_models: [leaky-llm]
   verdict_min_sharpe: 1.0
   verdict_max_trials: 5
 
 demo:
   agent_id: demo-agent
-  venue: binance
-  symbol: BTC-USDT-PERP
+  venue: moex-tbank
+  symbol: SBER-RUB-TQBR
   known_at: "2025-06-01T00:00:00Z"
   wall_clock: "2025-06-15T12:00:00Z"
   model: claude-sonnet-5-5

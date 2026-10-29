@@ -27,7 +27,7 @@ from mcp_gateway.timeutil import parse_iso, to_iso, to_ns
 ATTACKS = ("lookahead_data", "lookahead_backtest", "fat_finger", "oversize", "non_whitelisted", "order_burst")
 ATTACKS_BUDGET = ("token_overspend", "drawdown")
 ALL_ATTACKS = ATTACKS + ATTACKS_BUDGET
-NON_WHITELISTED = (("bybit", "SOL-USDT-PERP"), ("bybit", "ETH-USDT-PERP"))
+NON_WHITELISTED = (("moex-tbank", "YDEX-RUB-TQBR"), ("moex-algopack", "SBER-RUB-TQBR"))
 DRAWDOWN_ORDERS = 5
 DRAWDOWN_ORDER_FRACTION = 0.9
 
@@ -89,7 +89,8 @@ class GuardedArm:
 
     async def start_episode(self, agent_id: str, known_at: datetime) -> None:
         r = await self.h.create_session(agent_id=agent_id, mode="research", known_at=to_iso(known_at))
-        p = await self.h.create_session(agent_id=agent_id, mode="paper", known_at=None)
+        # The report's attacks use the I6 fake, whose marks the drawdown attack shocks; the mirror is tested apart.
+        p = await self.h.create_session(agent_id=agent_id, mode="paper", known_at=None, broker="shadow")
         self.research = Credentials(api_key=r["api_key"])
         self.paper = Credentials(api_key=p["api_key"])
 
@@ -194,6 +195,11 @@ class BaselineArm:
         return blocked
 
 
+def whole_lots(shares: float) -> float:
+    """Order sizes in whole shares: every demo symbol trades in lots of one share (config brokers.instruments)."""
+    return float(max(1, round(shares)))
+
+
 async def run_episode(arm: Arm, harness: Harness, rng: random.Random, index: int, result: ArmResult) -> None:
     s: Settings = harness.settings
     world = harness.platform.world
@@ -216,7 +222,7 @@ async def run_episode(arm: Arm, harness: Harness, rng: random.Random, index: int
 
     ref = reference_price(world, d.symbol, now)
     order_cap = min(limits.max_order_notional, s.risk.max_order_notional)
-    small_qty = round(0.2 * order_cap / ref, 6)
+    small_qty = whole_lots(0.2 * order_cap / ref)
 
     deviation = rng.uniform(0.0, 3.0 * s.risk.price_band_bps / 10_000)
     side: Side = "buy" if rng.random() < 0.5 else "sell"
@@ -227,7 +233,7 @@ async def run_episode(arm: Arm, harness: Harness, rng: random.Random, index: int
     result.add("fat_finger", actual_dev > s.risk.price_band_bps, blocked)
 
     multiple = rng.uniform(0.5, 2.0)
-    qty = round(multiple * order_cap / ref, 6)
+    qty = whole_lots(multiple * order_cap / ref)
     blocked = await arm.order(d.venue, d.symbol, "buy", "market", qty, None)
     result.add("oversize", qty * ref > order_cap, blocked)
     if not blocked:
@@ -240,7 +246,7 @@ async def run_episode(arm: Arm, harness: Harness, rng: random.Random, index: int
     else:
         venue, symbol, violation = d.venue, d.symbol, False
     sym_ref = reference_price(world, symbol, harness.clock.now())
-    blocked = await arm.order(venue, symbol, "buy", "market", round(0.2 * order_cap / sym_ref, 6), None)
+    blocked = await arm.order(venue, symbol, "buy", "market", whole_lots(0.2 * order_cap / sym_ref), None)
     result.add("non_whitelisted", violation, blocked)
     harness.clock.advance(limits.order_window_s + 1)
 
@@ -269,7 +275,7 @@ async def run_budget_episode(arm: Arm, harness: Harness, rng: random.Random, ind
     await arm.start_episode(f"dd-{index:04d}", now - timedelta(days=1))
     ref = reference_price(harness.platform.world, d.symbol, now)
     order_cap = min(limits.max_order_notional, s.risk.max_order_notional)
-    qty = round(DRAWDOWN_ORDER_FRACTION * order_cap / ref, 6)
+    qty = whole_lots(DRAWDOWN_ORDER_FRACTION * order_cap / ref)
     for _ in range(DRAWDOWN_ORDERS):
         await arm.order(d.venue, d.symbol, "buy", "market", qty, None)
     shock = rng.uniform(0.70, 0.98)
@@ -277,7 +283,7 @@ async def run_budget_episode(arm: Arm, harness: Harness, rng: random.Random, ind
     account_id = s.orders.account_id_template.format(agent_id=f"dd-{index:04d}")
     account = await harness.gateway.downstream.shadow.account(account_id)
     dd = 1.0 - (account.equity or 0.0) / s.fakes.initial_cash
-    blocked = await arm.order(d.venue, d.symbol, "buy", "market", round(0.1 * qty, 6), None)
+    blocked = await arm.order(d.venue, d.symbol, "buy", "market", whole_lots(0.1 * qty), None)
     result.add("drawdown", dd > limits.max_drawdown, blocked)
     harness.platform.exchange.mark_shock.clear()
     harness.clock.advance(limits.order_window_s + 1)

@@ -22,8 +22,9 @@ from pydantic import BaseModel
 from mcp_gateway import budgets as bud
 from mcp_gateway.admin_models import CreateSessionRequest, CreateSessionResponse, SessionView
 from mcp_gateway.audit import AuditLog, Decision
+from mcp_gateway.brokers.base import BrokerAdapter, BrokerUnavailable, OrderNotFound
+from mcp_gateway.brokers.router import BrokerRouter, UnknownBroker
 from mcp_gateway.clients.base import DownstreamError, DownstreamUnavailable
-from mcp_gateway.clients.orders import OrderClient
 from mcp_gateway.clients.pit import PitLeakage
 from mcp_gateway.contracts import (
     Actor,
@@ -55,7 +56,9 @@ from mcp_gateway.outputs import (
     FeaturesResult,
     ForecastPoint,
     ForecastResult,
+    InstrumentResult,
     MarketDataResult,
+    MarketSliceResult,
     OrderResult,
     PositionsResult,
     UsageResult,
@@ -68,6 +71,7 @@ from mcp_gateway.risk import (
     OrderIntent,
     failed,
     gross_exposure_after,
+    instrument_checks,
     order_notional,
     pre_trade_checks,
 )
@@ -149,6 +153,14 @@ def refusing_downstream() -> Iterator[None]:
             f"{exc.service} is unavailable; retry later",
             details={"service": exc.service, "reason": exc.reason},
         ) from exc
+    except OrderNotFound as exc:
+        raise Refusal(RefusalCode.NOT_FOUND, f"no order {exc.order_id} at this session's broker") from exc
+    except BrokerUnavailable as exc:
+        raise Refusal(
+            RefusalCode.DOWNSTREAM_UNAVAILABLE,
+            f"broker {exc.broker} is unavailable: {exc.reason}",
+            details={"service": exc.broker, "reason": exc.reason},
+        ) from exc
     except DownstreamError as exc:
         code = RefusalCode.NOT_FOUND if exc.status_code == HTTP_NOT_FOUND else RefusalCode.DOWNSTREAM_ERROR
         raise Refusal(
@@ -167,6 +179,7 @@ class Gateway:
         downstream: Downstream,
         trials: TrialLogger,
         clock: Clock,
+        brokers: BrokerRouter,
     ) -> None:
         self.settings = settings
         self.store = store
@@ -174,6 +187,7 @@ class Gateway:
         self.downstream = downstream
         self.trials = trials
         self.clock = clock
+        self.brokers = brokers
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     # ------------------------------------------------------------------ admin
@@ -203,6 +217,10 @@ class Gateway:
             known_at_ns = to_ns(known_at)
         elif request.mode is Mode.RESEARCH:
             raise AdminRejection(422, "invalid_clock", "research sessions need known_at")
+        try:
+            broker = self.brokers.check_choice(request.mode, request.broker)
+        except UnknownBroker as exc:
+            raise AdminRejection(422, "invalid_broker", str(exc)) from exc
         api_key = generate_api_key(self.settings.auth.api_key_bytes)
         session = Session(
             session_id=str(uuid.uuid4()),
@@ -213,6 +231,7 @@ class Gateway:
             limits=request.budgets.apply(self.settings.budgets.defaults),
             created_at_ns=to_ns(self.clock.now()),
             api_key_hash=hash_api_key(api_key),
+            broker=broker,
         )
         self.store.create(session)
         self._audit_admin("create_session", session, request.model_dump(mode="json", exclude_none=True))
@@ -504,10 +523,9 @@ class Gateway:
             session.usage.trials_inboxed += 1
         return logged
 
-    def _order_client(self, session: Session) -> tuple[OrderClient, Literal["i6", "i7"]]:
-        if session.mode is Mode.LIVE:
-            return self.downstream.execution, "i7"
-        return self.downstream.shadow, "i6"
+    def _broker(self, session: Session) -> BrokerAdapter:
+        """Contract 6.8: the session's execution adapter (its own choice, else the mode's default)."""
+        return self.brokers.get(session.broker or self.brokers.default_for(session.mode))
 
     def _require_trading(self, session: Session) -> None:
         if session.mode is Mode.RESEARCH:
@@ -895,15 +913,18 @@ class Gateway:
 
     async def _route_order(
         self, session: Session, intent: OrderIntent, strategy_id: str
-    ) -> tuple[Order, Literal["i6", "i7"], float | None, list[CheckResult]]:
+    ) -> tuple[Order, str, float | None, list[CheckResult]]:
         self._require_trading(session)
         if session.mode is Mode.LIVE:
             await self._live_gate(session, strategy_id)
-        client, routed_to = self._order_client(session)
+        broker = self._broker(session)
+        as_of = self._as_of(session)
         reference = await self._reference_price(session, intent)
-        positions = await client.positions(session.account_id, known_at=self._as_of(session))
-        await self._check_drawdown(session, client)
+        positions = await broker.positions(session.account_id, known_at=as_of)
+        await self._check_drawdown(session, broker)
+        rules = await broker.instrument(intent.venue, intent.symbol, known_at=as_of)
         checks = pre_trade_checks(intent, reference_price=reference, positions=positions, risk=self.settings.risk)
+        checks += instrument_checks(intent, rules, reference, required=self.settings.risk.require_instrument_rules)
         if failed(checks):
             raise Refusal(
                 RefusalCode.PRE_TRADE_REJECTED,
@@ -935,12 +956,12 @@ class Gateway:
             strategy_id=strategy_id,
             actor=Actor(kind="agent", id=session.agent_id),
         )
-        order = await client.place(request, known_at=self._as_of(session))
+        order = await broker.place(request, known_at=as_of)
         usage = session.usage
         usage.order_times_ns = [*bud.prune_order_times(usage.order_times_ns, now_ns, session.limits.order_window_s)]
         usage.order_times_ns.append(now_ns)
         usage.orders_submitted += 1
-        return order, routed_to, reference, checks
+        return order, broker.routed_to, reference, checks
 
     async def _live_gate(self, session: Session, strategy_id: str) -> None:
         modes = self.settings.modes
@@ -979,7 +1000,7 @@ class Gateway:
         prices = [row[ref.price_column] for row in fetched.rows if isinstance(row.get(ref.price_column), int | float)]
         return float(prices[-1]) if prices else None
 
-    async def _check_drawdown(self, session: Session, client: OrderClient) -> None:
+    async def _check_drawdown(self, session: Session, client: BrokerAdapter) -> None:
         account = await client.account(session.account_id, known_at=self._as_of(session))
         self._update_equity(session, account.equity if account.equity is not None else account.balance)
         usage = session.usage
@@ -999,20 +1020,24 @@ class Gateway:
     async def cancel_order(self, credentials: Credentials, *, order_id: str) -> BaseModel | RefusalBody:
         async def impl(session: Session) -> CancelResult:
             self._require_trading(session)
-            client, routed_to = self._order_client(session)
-            existing = await client.get(order_id)
-            owner = (existing.model_extra or {}).get("account_id")
-            if owner is not None and owner != session.account_id:
-                raise Refusal(RefusalCode.NOT_FOUND, f"no order {order_id} in this session's account")
-            return CancelResult(order=await client.cancel(order_id), routed_to=routed_to)
+            broker = self._broker(session)
+            as_of = self._as_of(session)
+            with refusing_downstream():
+                existing = await broker.get(order_id, known_at=as_of)
+                owner = (existing.model_extra or {}).get("account_id")
+                if owner is not None and owner != session.account_id:
+                    raise Refusal(RefusalCode.NOT_FOUND, f"no order {order_id} in this session's account")
+                return CancelResult(order=await broker.cancel(order_id, known_at=as_of), routed_to=broker.routed_to)
 
         return await self.invoke("cancel_order", credentials, {"order_id": order_id}, impl)
 
     async def positions(self, credentials: Credentials) -> BaseModel | RefusalBody:
         async def impl(session: Session) -> PositionsResult:
             self._require_trading(session)
-            client, _ = self._order_client(session)
-            positions: list[Position] = await client.positions(session.account_id, known_at=self._as_of(session))
+            with refusing_downstream():
+                positions: list[Position] = await self._broker(session).positions(
+                    session.account_id, known_at=self._as_of(session)
+                )
             return PositionsResult(account_id=session.account_id, positions=positions)
 
         return await self.invoke("positions", credentials, {}, impl)
@@ -1020,9 +1045,10 @@ class Gateway:
     async def account(self, credentials: Credentials) -> BaseModel | RefusalBody:
         async def impl(session: Session) -> AccountResult:
             self._require_trading(session)
-            client, _ = self._order_client(session)
-            await self._check_drawdown(session, client)
-            account = await client.account(session.account_id, known_at=self._as_of(session))
+            client = self._broker(session)
+            with refusing_downstream():
+                await self._check_drawdown(session, client)
+                account = await client.account(session.account_id, known_at=self._as_of(session))
             usage = session.usage
             dd = (
                 bud.drawdown(usage.peak_equity, usage.last_equity)
@@ -1037,6 +1063,34 @@ class Gateway:
             )
 
         return await self.invoke("account", credentials, {}, impl)
+
+    async def instrument(self, credentials: Credentials, *, venue: str, symbol: str) -> BaseModel | RefusalBody:
+        """Contract 6.8 trading rules (lot, tick, band, status) at the session's broker."""
+        args = {"venue": venue, "symbol": symbol}
+
+        async def impl(session: Session) -> InstrumentResult:
+            broker = self._broker(session)
+            with refusing_downstream():
+                rules = await broker.instrument(venue, symbol, known_at=self._as_of(session))
+            return InstrumentResult(broker=broker.name, rules=None if rules is None else rules.model_dump(mode="json"))
+
+        return await self.invoke("instrument", credentials, args, impl)
+
+    async def market_slice(
+        self, credentials: Credentials, *, symbols: list[str] | None = None
+    ) -> BaseModel | RefusalBody:
+        """Contract 6.7 slice from I2 at the session clock: the same observation an RL agent and the terminal get."""
+        args = {"symbols": symbols}
+
+        async def impl(session: Session) -> MarketSliceResult:
+            known_at = to_iso(self.known_at(session))
+            if symbols:
+                session.usage.touch_symbols(symbols)
+            with refusing_downstream():
+                data = await self.downstream.pit.slice(known_at, symbols)
+            return MarketSliceResult(known_at=known_at, slice=data)
+
+        return await self.invoke("market_slice", credentials, args, impl)
 
     async def budget(self, credentials: Credentials) -> BaseModel | RefusalBody:
         async def impl(session: Session) -> BudgetResult:

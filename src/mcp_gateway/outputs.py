@@ -97,7 +97,7 @@ class VerdictResult(ToolOutput):
 
 class OrderResult(ToolOutput):
     order: Order
-    routed_to: Literal["i6", "i7"]
+    routed_to: str = Field(description="Execution adapter: mirror, i6 (shadow), i7 (execution), tbank-sandbox.")
     ledger_strategy_id: str
     notional: float | None = Field(description="qty * price in quote currency (reference price for market).")
     reference_price: float | None
@@ -108,7 +108,7 @@ class OrderResult(ToolOutput):
 
 class CancelResult(ToolOutput):
     order: Order
-    routed_to: Literal["i6", "i7"]
+    routed_to: str
 
 
 class PositionsResult(ToolOutput):
@@ -152,3 +152,17 @@ class UsageResult(ToolOutput):
     cost_usd: float = Field(description="Cost of this report in USD from the gateway price table.")
     usage: UsageTotals
     remaining: dict[str, float]
+
+
+class InstrumentResult(ToolOutput):
+    """Trading rules of one instrument at the session's broker (contract 6.8)."""
+
+    broker: str
+    rules: dict[str, Any] | None
+
+
+class MarketSliceResult(ToolOutput):
+    """Contract 6.7: every metric of the requested instruments as known at the session clock."""
+
+    known_at: str
+    slice: dict[str, Any]

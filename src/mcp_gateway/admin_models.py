@@ -23,6 +23,11 @@ class CreateSessionRequest(BaseModel):
     account_id: str | None = Field(
         default=None, description="Optional extension: I6/I7 account; defaults to orders.account_id_template."
     )
+    broker: str | None = Field(
+        default=None,
+        description="Optional extension (contract 6.8): execution adapter of a paper session, one of "
+        "brokers.allowed_paper; default brokers.paper (the mirror sandbox).",
+    )
 
 
 class SetClockRequest(BaseModel):
@@ -37,6 +42,7 @@ class SessionView(BaseModel):
     mode: Mode
     known_at: str | None
     account_id: str
+    broker: str | None
     status: SessionStatus
     freeze: FreezeInfo | None
     limits: BudgetLimits
@@ -51,6 +57,7 @@ class SessionView(BaseModel):
             mode=session.mode,
             known_at=None if session.known_at_ns is None else ns_to_iso(session.known_at_ns),
             account_id=session.account_id,
+            broker=session.broker,
             status=session.status,
             freeze=session.freeze,
             limits=session.limits,

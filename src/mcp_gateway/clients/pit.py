@@ -49,3 +49,12 @@ class PitClient(ServiceClient):
 
     async def training_set(self, request: PitTrainingSetRequest) -> PitResult:
         return await self._post("/v1/features/training-set", request.model_dump(mode="json", exclude_none=True))
+
+    async def slice(self, known_at: str, symbols: list[str] | None = None) -> dict[str, Any]:
+        """Contract 6.7 market slice as known at ``known_at`` (I2 ``GET /v1/slice``)."""
+        params: dict[str, Any] = {"known_at": known_at}
+        if symbols:
+            params["symbols"] = ",".join(symbols)
+        response = await self.request("GET", "/v1/slice", params=params)
+        data: dict[str, Any] = response.json()
+        return data

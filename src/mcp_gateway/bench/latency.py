@@ -117,7 +117,7 @@ async def measure_transports(h: Harness, n: int, warmup: int) -> dict[str, dict[
 async def measure_order_overhead(h: Harness, n: int, warmup: int) -> dict[str, list[float]]:
     """place_order latency (ms), guarded vs pass-through, both direct calls against the same fake I6."""
     d = h.settings.demo
-    session = await h.create_session(agent_id="latency-orders", mode="paper", known_at=None)
+    session = await h.create_session(agent_id="latency-orders", mode="paper", known_at=None, broker="shadow")
     creds = Credentials(api_key=session["api_key"])
     wrapper = PassThroughWrapper(h.settings, h.gateway.downstream, h.clock, "latency-orders-baseline")
     window_s = h.settings.budgets.defaults.order_window_s
@@ -135,7 +135,7 @@ async def measure_order_overhead(h: Harness, n: int, warmup: int) -> dict[str, l
             symbol=d.symbol,
             side=side(),
             type="market",
-            qty=0.01,
+            qty=1.0,
             price=None,
             strategy_id="latency",
             rationale="latency probe",
@@ -145,7 +145,7 @@ async def measure_order_overhead(h: Harness, n: int, warmup: int) -> dict[str, l
 
     async def baseline() -> None:
         await wrapper.place_order(
-            venue=d.venue, symbol=d.symbol, side=side(), type="market", qty=0.01, price=None, strategy_id="latency"
+            venue=d.venue, symbol=d.symbol, side=side(), type="market", qty=1.0, price=None, strategy_id="latency"
         )
 
     return {

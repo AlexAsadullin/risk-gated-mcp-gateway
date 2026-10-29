@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -101,8 +102,66 @@ TAPE_COLUMNS = [
 ]
 
 
-def build_fake_pit(world: SyntheticWorld, received: list[PitQuery], *, leak_future_rows: bool = False) -> FastAPI:
-    """Fake of I2's shipped API: tape queries and grid training sets, JSON with ISO-8601 timestamps.
+BOOK_COLUMNS = ["valid_time", "knowledge_time", "venue", "symbol", "side", "price", "size", "level", "snapshot_id"]
+
+
+def _latest_known_bar(world: SyntheticWorld, start_ns: int, end_ns: int, known_ns: int) -> int | None:
+    bars = [i for i in world.bars(start_ns, end_ns) if world.knowledge_ns(i) <= known_ns]
+    return bars[-1] if bars else None
+
+
+def fake_book(world: SyntheticWorld, cfg: FakeSettings, venue: Any, symbol: str, i: int) -> list[dict[str, Any]]:
+    """A symmetric book around the bar price: ``book_levels`` levels per side on the symbol's tick."""
+    tick = cfg.book_ticks.get(symbol, 0.01)
+    bid = math.floor(world.price_at_index(symbol, i) / tick) * tick
+    valid, known = ns_to_iso(world.valid_ns(i)), ns_to_iso(world.knowledge_ns(i))
+    rows: list[dict[str, Any]] = []
+    for level in range(cfg.book_levels):
+        for side, price in (("bid", bid - level * tick), ("ask", bid + (level + 1) * tick)):
+            rows.append(
+                {
+                    "valid_time": valid,
+                    "knowledge_time": known,
+                    "venue": venue,
+                    "symbol": symbol,
+                    "side": side,
+                    "price": round(price, 6),
+                    "size": cfg.book_level_size * (level + 1),
+                    "level": level,
+                    "snapshot_id": f"fake-{symbol}-{i}",
+                }
+            )
+    return rows
+
+
+def fake_slice(world: SyntheticWorld, cfg: FakeSettings, known_ns: int, symbols: list[str]) -> dict[str, Any]:
+    """Contract 6.7 shape, filled from the synthetic world (the fields the gateway's tests read)."""
+    out = []
+    for symbol in symbols:
+        i = world.bar_index(known_ns)
+        while world.knowledge_ns(i) > known_ns:
+            i -= 1
+        book = fake_book(world, cfg, "fake", symbol, i)
+        bid = max(r["price"] for r in book if r["side"] == "bid")
+        ask = min(r["price"] for r in book if r["side"] == "ask")
+        out.append(
+            {
+                "symbol": symbol,
+                "as_of": ns_to_iso(world.knowledge_ns(i)),
+                "best_bid": bid,
+                "best_ask": ask,
+                "mid": (bid + ask) / 2,
+                "last_price": world.price_at_index(symbol, i),
+                "stale": False,
+            }
+        )
+    return {"schema_version": "1", "known_at": ns_to_iso(known_ns), "instruments": out, "fingerprint": "sha256:fake"}
+
+
+def build_fake_pit(
+    world: SyntheticWorld, received: list[PitQuery], cfg: FakeSettings, *, leak_future_rows: bool = False
+) -> FastAPI:
+    """Fake of I2's shipped API: tape queries, order books, the market slice and grid training sets.
 
     Like the real store it orders tape rows by key columns (here ``trade_id``, which is not time order), so the
     gateway's own sort by valid time is exercised.
@@ -120,6 +179,10 @@ def build_fake_pit(world: SyntheticWorld, received: list[PitQuery], *, leak_futu
         symbol = str(_filter_value(filters, "symbol"))
         venue = _filter_value(filters, "venue")
         rows: list[dict[str, Any]] = []
+        if body.dataset == "tape.book_snapshot":
+            bar = _latest_known_bar(world, start_ns, end_ns, known_ns) if symbol in world.base_prices else None
+            book = [] if bar is None else fake_book(world, cfg, venue, symbol, bar)
+            return _answer(body.model_dump_json(), BOOK_COLUMNS, book)
         if symbol in world.base_prices:
             for i in world.bars(start_ns, end_ns):
                 if world.knowledge_ns(i) > known_ns and not leak_future_rows:
@@ -127,6 +190,11 @@ def build_fake_pit(world: SyntheticWorld, received: list[PitQuery], *, leak_futu
                 rows.append(_tape_row(world, venue, symbol, i))
         rows.sort(key=lambda r: str(r["trade_id"]))
         return _answer(body.model_dump_json(), TAPE_COLUMNS, rows)
+
+    @app.get("/v1/slice")
+    async def market_slice(known_at: str, symbols: str | None = None) -> dict[str, Any]:
+        chosen = [s for s in (symbols or "").split(",") if s] or sorted(world.base_prices)
+        return fake_slice(world, cfg, to_ns(parse_iso(known_at)), [s for s in chosen if s in world.base_prices])
 
     @app.post("/v1/features/training-set")
     async def training_set(body: PitTrainingSetRequest) -> JSONResponse:
@@ -437,7 +505,7 @@ class FakePlatform:
 
     def apps(self) -> dict[str, FastAPI]:
         return {
-            "pit": build_fake_pit(self.world, self.pit_queries, leak_future_rows=self.leak_future_rows),
+            "pit": build_fake_pit(self.world, self.pit_queries, self.cfg, leak_future_rows=self.leak_future_rows),
             "forecast": build_fake_forecast(self.world),
             "backtest": build_fake_backtest(self.world, self.backtests, self.ledger, self.clock),
             "ledger": build_fake_ledger(self.ledger, self.cfg, self.clock),

@@ -35,6 +35,7 @@ class DemoResult:
     chain_intact: bool = False
     ledger_trials: int = 0
     exchange_orders: int = 0
+    mirror_orders: int = 0
     summary_path: str = ""
 
     def record(self, name: str, tool: str, reply: ToolReply, detail: str) -> ToolReply:
@@ -47,7 +48,11 @@ def demo_settings(settings: Settings) -> Settings:
     """Point sessions and audit at the demo folder so every run starts clean and is self-contained."""
     demo = settings.storage.demo_dir
     storage = settings.storage.model_copy(
-        update={"sessions_db": f"{demo}/sessions.sqlite3", "audit_dir": f"{demo}/audit"}
+        update={
+            "sessions_db": f"{demo}/sessions.sqlite3",
+            "audit_dir": f"{demo}/audit",
+            "brokers_dir": f"{demo}/brokers",
+        }
     )
     return settings.model_copy(update={"storage": storage})
 
@@ -101,7 +106,7 @@ async def _research(agent: AgentConnection, s: Settings, result: DemoResult) -> 
         symbol=d.symbol,
         side="buy",
         type="market",
-        qty=0.01,
+        qty=10.0,
         strategy_id="tsmom",
         rationale="research sessions cannot trade",
     )
@@ -110,13 +115,37 @@ async def _research(agent: AgentConnection, s: Settings, result: DemoResult) -> 
 
 async def _paper(agent: AgentConnection, s: Settings, result: DemoResult) -> None:
     d = s.demo
+    reply = await agent.call("market_slice", symbols=[d.symbol])
+    first = (reply.data.get("slice", {}).get("instruments") or [{}])[0]
+    result.record(
+        "market slice (what an RL policy sees)",
+        "market_slice",
+        reply,
+        f"bid={first.get('best_bid')} ask={first.get('best_ask')}",
+    )
+    reply = await agent.call("instrument", venue=d.venue, symbol=d.symbol)
+    rules = reply.data.get("rules") or {}
+    result.record(
+        "trading rules at the broker", "instrument", reply, f"lot={rules.get('lot_size')} tick={rules.get('tick')}"
+    )
     reply = await agent.call(
         "place_order",
         venue=d.venue,
         symbol=d.symbol,
         side="buy",
         type="market",
-        qty=0.05,
+        qty=0.5,
+        strategy_id="tsmom",
+        rationale="half a share is not a whole lot",
+    )
+    result.record("order of a fractional lot", "place_order", reply, reply.data.get("message", ""))
+    reply = await agent.call(
+        "place_order",
+        venue=d.venue,
+        symbol=d.symbol,
+        side="buy",
+        type="market",
+        qty=100.0,
         strategy_id="tsmom",
         rationale="momentum is positive over 24 bars",
     )
@@ -131,7 +160,7 @@ async def _paper(agent: AgentConnection, s: Settings, result: DemoResult) -> Non
         symbol=d.symbol,
         side="buy",
         type="limit",
-        qty=0.05,
+        qty=100.0,
         price=round(ref * 1.10, 2),
         strategy_id="tsmom",
         rationale="fat-finger: limit 10% through the market",
@@ -161,7 +190,10 @@ async def run_demo(settings: Settings) -> DemoResult:
     paper = await harness.create_session(agent_id=d.agent_id, mode="paper", known_at=None)
     async with harness.agent(paper["api_key"]) as agent:
         await _paper(agent, settings, result)
+    mirror_orders = harness.gateway.brokers.mirror.order_count()
+    await harness.gateway.brokers.aclose()
     await harness.gateway.downstream.aclose()
+    result.mirror_orders = mirror_orders
     result.audit = harness.gateway.audit.read()
     result.chain_intact = all(verify_chain(p) is None for p in harness.gateway.audit.files())
     result.ledger_trials = len(harness.platform.ledger.trials)
@@ -170,6 +202,7 @@ async def run_demo(settings: Settings) -> DemoResult:
         "steps": [step.__dict__ for step in result.steps],
         "ledger_trials": result.ledger_trials,
         "exchange_orders": result.exchange_orders,
+        "mirror_orders": result.mirror_orders,
         "audit_entries": len(result.audit),
         "audit_chain_intact": result.chain_intact,
     }

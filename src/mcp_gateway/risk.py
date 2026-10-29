@@ -7,12 +7,17 @@ orders; float64 is adequate here because limits are coarse thresholds, not accou
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from mcp_gateway.contracts import OrderType, Position, Side
 from mcp_gateway.settings import RiskSettings
+
+if TYPE_CHECKING:
+    from mcp_gateway.brokers.base import InstrumentRules
 
 BPS = 10_000.0
 
@@ -139,6 +144,49 @@ def pre_trade_checks(
                 threshold=risk.max_position_notional,
             )
         )
+    return checks
+
+
+def on_grid(value: float, step: float) -> bool:
+    """True when ``value`` is a whole multiple of ``step`` (lots, ticks), within float rounding."""
+    ratio = value / step
+    return math.isclose(ratio, round(ratio), abs_tol=1e-6)
+
+
+def instrument_checks(
+    intent: OrderIntent, rules: InstrumentRules | None, reference_price: float | None, *, required: bool
+) -> list[CheckResult]:
+    """Exchange rules (contract 6.8): whole lots, price on the tick, inside the daily band, instrument tradable.
+
+    MOEX rejects orders that break these, so the gateway refuses them before any broker sees them.
+    """
+    if rules is None:
+        return [CheckResult(name="instrument_rules", passed=not required, value=None, threshold="known rules")]
+    checks = [
+        CheckResult(name="instrument_tradable", passed=rules.tradable, value=rules.trading_status or "tradable"),
+        CheckResult(
+            name="qty_whole_lots",
+            passed=intent.qty > 0 and on_grid(intent.qty, rules.lot_size),
+            value=intent.qty,
+            threshold=rules.lot_size,
+        ),
+    ]
+    if intent.type == "limit" and intent.price is not None:
+        checks.append(
+            CheckResult(
+                name="price_on_tick", passed=on_grid(intent.price, rules.tick), value=intent.price, threshold=rules.tick
+            )
+        )
+        if rules.price_band_bps is not None and reference_price:
+            deviation = abs(intent.price / reference_price - 1.0) * BPS
+            checks.append(
+                CheckResult(
+                    name="exchange_price_band_bps",
+                    passed=deviation <= rules.price_band_bps,
+                    value=round(deviation, 4),
+                    threshold=rules.price_band_bps,
+                )
+            )
     return checks
 
 

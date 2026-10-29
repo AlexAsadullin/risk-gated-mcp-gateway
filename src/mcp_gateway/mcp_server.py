@@ -1,4 +1,4 @@
-"""MCP adapter: exposes exactly the contract-6.6 tools over the ``mcp`` SDK.
+"""MCP adapter: exposes exactly the contract-6.6 tools (revision 2: plus ``market_slice`` and ``instrument``).
 
 Each tool returns a ``CallToolResult``. On success its ``structuredContent`` matches the tool's output schema;
 on refusal ``isError`` is true and ``structuredContent`` is a ``RefusalBody``. Agents never pass ``known_at``:
@@ -25,7 +25,9 @@ from mcp_gateway.outputs import (
     ClockResult,
     FeaturesResult,
     ForecastResult,
+    InstrumentResult,
     MarketDataResult,
+    MarketSliceResult,
     OrderResult,
     PositionsResult,
     UsageResult,
@@ -47,6 +49,8 @@ TOOL_NAMES = (
     "account",
     "budget",
     "report_usage",
+    "market_slice",
+    "instrument",
 )
 
 INSTRUCTIONS = (
@@ -105,16 +109,16 @@ def build_mcp_server(gateway: Gateway, credentials: CredentialSource) -> MCPServ
 
     @server.tool(
         description=(
-            "Market tape rows (trades, book_delta, book_snapshot, funding, liquidations, open_interest) for one "
-            "venue and symbol, as known at the session clock. end must be <= known_at. Returns the latest rows "
-            "up to the row cap; prices in quote currency, sizes in base units."
+            "Market tape rows (trades, book_snapshot, candles, trading_status, tradestats, orderstats, obstats) for "
+            "one venue and symbol, as known at the session clock. end must be <= known_at. Returns the latest rows "
+            "up to the row cap; prices in roubles, sizes in shares."
         ),
         annotations=READ_ONLY,
     )
     async def market_data(
         ctx: Context,
-        venue: Annotated[str, Field(description="Venue id, e.g. binance.")],
-        symbol: Annotated[str, Field(description="Normalised symbol BASE-QUOTE-KIND, e.g. BTC-USDT-PERP.")],
+        venue: Annotated[str, Field(description="Venue id, e.g. moex-tbank.")],
+        symbol: Annotated[str, Field(description="Normalised symbol <SECID>-RUB-<BOARD>, e.g. SBER-RUB-TQBR.")],
         channel: Annotated[str, Field(description="Tape channel, e.g. trades.")],
         start: ISO,
         end: ISO,
@@ -192,19 +196,21 @@ def build_mcp_server(gateway: Gateway, credentials: CredentialSource) -> MCPServ
 
     @server.tool(
         description=(
-            "Submit an order (paper sessions go to the shadow exchange I6, live to I7). Pre-trade checks: "
-            "whitelist, fat-finger price band, order and position notional, capital, rate and drawdown budgets. "
-            "qty in base units, price in quote currency (limit orders only). Logged as a trial."
+            "Submit an order to the session's broker (paper: the mirror sandbox, which matches against the real "
+            "order book; or the I6 shadow exchange or T-Bank sandbox if the session chose them; live: I7). "
+            "Pre-trade checks: whitelist, whole lots, price on the tick, exchange and fat-finger price bands, order "
+            "and position notional, capital, rate and drawdown budgets. qty in shares (a whole number of lots, see "
+            "instrument), price in roubles (limit orders only). Logged as a trial."
         ),
         annotations=ToolAnnotations(destructive_hint=True, open_world_hint=True),
     )
     async def place_order(
         ctx: Context,
-        venue: Annotated[str, Field(description="Venue id, e.g. binance.")],
-        symbol: Annotated[str, Field(description="Normalised symbol, e.g. BTC-USDT-PERP.")],
+        venue: Annotated[str, Field(description="Venue id, e.g. moex-tbank.")],
+        symbol: Annotated[str, Field(description="Normalised symbol, e.g. SBER-RUB-TQBR.")],
         side: Side,
         type: OrderType,
-        qty: Annotated[float, Field(description="Quantity in base units.", gt=0)],
+        qty: Annotated[float, Field(description="Quantity in shares, a whole number of lots.", gt=0)],
         strategy_id: Annotated[str, Field(description="Your strategy name.")],
         rationale: Annotated[str, Field(description="One or two sentences on why.", min_length=1, max_length=2000)],
         price: Annotated[float | None, Field(description="Limit price, quote currency; omit for market.")] = None,
@@ -257,5 +263,30 @@ def build_mcp_server(gateway: Gateway, credentials: CredentialSource) -> MCPServ
             credentials(ctx), tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency_ms, model=model
         )
         return to_result(outcome)
+
+    @server.tool(
+        description=(
+            "Market slice as known at the session clock: per instrument best bid/ask, spread, depth and imbalance, "
+            "last trade, VWAP, volume, 1m/5m returns, latest candle, trading status and AlgoPack Super Candles. "
+            "The same numbers an RL policy and the terminal see. Omit symbols for the configured universe."
+        ),
+        annotations=READ_ONLY,
+    )
+    async def market_slice(
+        ctx: Context,
+        symbols: Annotated[list[str] | None, Field(description="Normalised symbols; omit for all.")] = None,
+    ) -> Annotated[CallToolResult, MarketSliceResult]:
+        return to_result(await gateway.market_slice(credentials(ctx), symbols=symbols))
+
+    @server.tool(
+        description="Trading rules at this session's broker: lot size (shares), price tick, price band, status.",
+        annotations=READ_ONLY,
+    )
+    async def instrument(
+        ctx: Context,
+        venue: Annotated[str, Field(description="Venue id, e.g. moex-tbank.")],
+        symbol: Annotated[str, Field(description="Normalised symbol, e.g. SBER-RUB-TQBR.")],
+    ) -> Annotated[CallToolResult, InstrumentResult]:
+        return to_result(await gateway.instrument(credentials(ctx), venue=venue, symbol=symbol))
 
     return server
