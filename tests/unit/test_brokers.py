@@ -12,7 +12,7 @@ from mcp_gateway.brokers.base import BrokerUnavailable, ConfiguredRules, OrderNo
 from mcp_gateway.brokers.mirror import BookView, MirrorBroker, TradePrint
 from mcp_gateway.brokers.tbank_sandbox import TBankSandboxBroker, from_quotation, quotation, split_symbol
 from mcp_gateway.contracts import Actor, OrderRequest
-from mcp_gateway.settings import InstrumentRule, MirrorSettings, Settings, TBankSandboxSettings
+from mcp_gateway.settings import CommissionSettings, InstrumentRule, MirrorSettings, Settings, TBankSandboxSettings
 from mcp_gateway.timeutil import NS_PER_SECOND, ns_to_iso
 
 T0 = 1_792_497_600 * NS_PER_SECOND
@@ -36,12 +36,23 @@ class ScriptedMarket:
         return [p for p in self.prints if lo <= ns_to_iso(p.ts_ns) <= hi]
 
 
+COMMISSION = CommissionSettings(
+    source="test",
+    currency="RUB",
+    rate=0.0025,
+    zero_fee_rate=0.0,
+    rounding=0.01,
+    zero_fee_instruments=["TMOS"],
+    zero_fee_reference_file="",
+    zero_fee_reference_key="funds",
+)
+
+
 def mirror_cfg(**kw: object) -> MirrorSettings:
     base: dict[str, object] = {
         "initial_cash": 1_000_000.0,
         "currency": "RUB",
-        "taker_fee_bps": 4.0,
-        "maker_fee_bps": 2.0,
+        "commission": COMMISSION,
         "book_dataset": "tape.book_snapshot",
         "trades_dataset": "tape.trades",
         "book_lookback_s": 3600.0,
@@ -85,7 +96,9 @@ async def test_market_order_walks_the_book_and_pays_taker_fee() -> None:
     extra = order.model_extra or {}
     assert order.status == "filled"
     assert extra["avg_price"] == pytest.approx((285.01 * 50 + 285.02 * 30) / 80)
-    assert extra["fee"] == pytest.approx((285.01 * 50 + 285.02 * 30) * 4 / 10_000)
+    # 0.25% per fill, each rounded to the kopek: 285.01 * 50 -> 35.63, 285.02 * 30 -> 21.38.
+    assert extra["fee"] == pytest.approx(35.63 + 21.38)
+    assert [f["fee"] for f in extra["fills"]] == [35.63, 21.38]
     # The same snapshot cannot give its 50 shares at 285.01 twice.
     again = await b.place(req(client_order_id="c2", qty=10.0), known_at=AT)
     assert (again.model_extra or {})["avg_price"] == pytest.approx(285.02)
@@ -139,7 +152,7 @@ async def test_resting_order_waits_for_its_queue_then_fills_as_maker(tmp_path: P
     m.prints.append(TradePrint(T0 + 5 * NS_PER_SECOND, 284.98, 1.0, "sell"))  # traded through the price
     done = await b.get(rest.order_id, known_at=ns_to_iso(T0 + 6 * NS_PER_SECOND))
     assert done.status == "filled"
-    assert (done.model_extra or {})["fee"] == pytest.approx(285.0 * 30 * 2 / 10_000)
+    assert (done.model_extra or {})["fee"] == pytest.approx(7.13 + 14.25)  # maker fills of 10 and 20
     # State survives a restart of the gateway.
     again = broker(m, tmp_path)
     assert (await again.get(rest.order_id, known_at=ns_to_iso(T0 + 7 * NS_PER_SECOND))).status == "filled"
@@ -292,10 +305,87 @@ def test_router_rejects_unknown_broker(settings: Settings) -> None:
     from mcp_gateway.settings import Mode
 
     assert router.check_choice(Mode.PAPER, None) == "mirror"
-    assert router.check_choice(Mode.PAPER, "tbank-sandbox") == "tbank-sandbox"
+    enabled = settings.brokers.model_copy(
+        update={
+            "allowed_paper": [*settings.brokers.allowed_paper, "tbank-sandbox"],
+            "tbank_sandbox": settings.brokers.tbank_sandbox.model_copy(update={"enabled": True}),
+        }
+    )
+    opted_in = BrokerRouter(enabled, build_downstream(settings.services, {}), None, lambda: 0)
+    assert opted_in.check_choice(Mode.PAPER, "tbank-sandbox") == "tbank-sandbox"
     with pytest.raises(UnknownBroker):
         router.check_choice(Mode.PAPER, "execution")
     with pytest.raises(UnknownBroker):
         router.check_choice(Mode.LIVE, "mirror")
     with pytest.raises(UnknownBroker):
         router.get("nope")
+
+
+# -- commission in the mirror (T-Invest tariff) ------------------------------------------------------------
+
+TMOS = "TMOS-RUB-TQTF"
+
+
+async def test_both_sides_pay_commission_and_pnl_is_net_of_fees() -> None:
+    m = ScriptedMarket()
+    b = broker(m)
+    buy = await b.place(req(qty=50.0), known_at=AT)  # 50 at 285.01
+    sell = await b.place(req(client_order_id="c2", side="sell", qty=50.0), known_at=AT)  # 50 at 285.00
+    buy_fee, sell_fee = (buy.model_extra or {})["fee"], (sell.model_extra or {})["fee"]
+    assert (buy_fee, sell_fee) == (35.63, 35.63)  # 14,250.50 and 14,250.00 roubles, 0.25%, half-up to the kopek
+    (fill,) = (sell.model_extra or {})["fills"]
+    assert fill == {"ts_fill": AT, "price": 285.0, "qty": 50.0, "fee": 35.63, "liquidity": "taker"}
+    acct = await b.account("acc", known_at=AT)
+    extra = acct.model_extra or {}
+    assert extra["fees"] == pytest.approx(71.26)
+    assert acct.balance == pytest.approx(1_000_000 - 50 * 0.01 - 71.26)
+    assert extra["pnl"] == pytest.approx(-50 * 0.01 - 71.26)  # flat again: spread paid plus both fees
+
+
+async def test_zero_fee_fund_pays_nothing() -> None:
+    rules = ConfiguredRules(
+        [
+            InstrumentRule(venue=V, symbol=SYM, lot_size=1, tick=0.01, currency="RUB"),
+            InstrumentRule(venue=V, symbol=TMOS, lot_size=1, tick=0.01, currency="RUB"),
+        ]
+    )
+    b = MirrorBroker(ScriptedMarket(), rules, mirror_cfg(), None, lambda: T0)
+    fund = await b.place(req(symbol=TMOS, qty=100.0), known_at=AT)
+    stock = await b.place(req(qty=100.0), known_at=AT)
+    assert (fund.model_extra or {})["filled_qty"] == 100.0
+    assert (fund.model_extra or {})["fee"] == 0.0
+    assert (stock.model_extra or {})["fee"] > 0
+    acct = await b.account("acc", known_at=AT)
+    assert (acct.model_extra or {})["fees"] == (stock.model_extra or {})["fee"]
+
+
+async def test_mirror_state_without_deposit_field_still_loads(tmp_path: Path) -> None:
+    state = tmp_path / "mirror.json"
+    state.write_text(json.dumps({"accounts": {"acc": {"cash": 1_000_000.0, "currency": "RUB", "fees": 0.0}}}))
+    acct = await broker(ScriptedMarket(), tmp_path).account("acc", known_at=AT)
+    assert (acct.model_extra or {})["pnl"] == 0.0
+
+
+def test_tbank_sandbox_is_disabled_by_default(settings: Settings) -> None:
+    from mcp_gateway.brokers.router import BrokerDisabled, BrokerRouter
+    from mcp_gateway.downstream import build_downstream
+    from mcp_gateway.settings import Mode
+
+    cfg = settings.brokers
+    assert cfg.tbank_sandbox.enabled is False
+    assert "tbank-sandbox" not in (cfg.paper, cfg.live, *cfg.allowed_paper)
+    downstream = build_downstream(settings.services, {})
+    router = BrokerRouter(cfg, downstream, None, lambda: 0)
+    with pytest.raises(BrokerDisabled, match="enabled is false"):
+        router.check_choice(Mode.PAPER, "tbank-sandbox")
+    with pytest.raises(BrokerDisabled):
+        router.get("tbank-sandbox")
+    # Even when listed in allowed_paper, the flag still wins.
+    listed = BrokerRouter(
+        cfg.model_copy(update={"allowed_paper": [*cfg.allowed_paper, "tbank-sandbox"]}), downstream, None, lambda: 0
+    )
+    with pytest.raises(BrokerDisabled):
+        listed.check_choice(Mode.PAPER, "tbank-sandbox")
+    # A default that points at T-Bank while disabled stops the gateway from starting.
+    with pytest.raises(BrokerDisabled):
+        BrokerRouter(cfg.model_copy(update={"paper": "tbank-sandbox"}), downstream, None, lambda: 0)

@@ -524,12 +524,75 @@ async def test_session_broker_choice_is_validated(harness: Harness) -> None:
         assert bad.json()["code"] == "invalid_broker"
 
 
+def tbank_enabled(settings: Settings) -> Settings:
+    cfg = settings.brokers
+    brokers = cfg.model_copy(
+        update={
+            "allowed_paper": [*cfg.allowed_paper, "tbank-sandbox"],
+            "tbank_sandbox": cfg.tbank_sandbox.model_copy(update={"enabled": True}),
+        }
+    )
+    return settings.model_copy(update={"brokers": brokers})
+
+
+async def test_tbank_sandbox_is_refused_while_disabled(harness: Harness) -> None:
+    """Trading is local only: no session can pick the T-Bank sandbox unless config enables it."""
+    async with harness.admin_client() as client:
+        prefix = harness.settings.server.admin_prefix
+        body = {"agent_id": "x", "mode": "paper", "broker": "tbank-sandbox"}
+        refused = await client.post(f"{prefix}/sessions", json=body)
+    assert refused.status_code == 403
+    assert refused.json()["code"] == "broker_disabled"
+    assert "brokers.tbank_sandbox.enabled" in refused.json()["message"]
+    assert (await harness.create_session(agent_id="x", mode="paper"))["broker"] == "mirror"
+
+
+async def test_stored_tbank_session_is_refused_after_disabling(settings: Settings) -> None:
+    """A session created while T-Bank was enabled cannot reach it once the flag is off again."""
+    on = Harness.create(tbank_enabled(settings), admin_key=ADMIN_KEY)
+    s = await on.create_session(agent_id="tb", mode="paper", broker="tbank-sandbox")
+    await on.gateway.downstream.aclose()
+    off = Harness.create(settings, admin_key=ADMIN_KEY)
+    try:
+        async with off.agent(s["api_key"]) as a:
+            out = await a.call("place_order", **order(off))
+        assert out.code == "mode_forbidden"
+        assert "disabled" in out.data["message"]
+    finally:
+        await off.gateway.downstream.aclose()
+
+
 async def test_tbank_sandbox_without_token_is_a_structured_refusal(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("TBANK_TOKEN", raising=False)
-    s = await harness.create_session(agent_id="tb", mode="paper", broker="tbank-sandbox")
-    async with harness.agent(s["api_key"]) as a:
-        out = await a.call("instrument", venue="moex-tbank", symbol="SBER-RUB-TQBR")
+    harness = Harness.create(tbank_enabled(settings), admin_key=ADMIN_KEY)
+    try:
+        s = await harness.create_session(agent_id="tb", mode="paper", broker="tbank-sandbox")
+        async with harness.agent(s["api_key"]) as a:
+            out = await a.call("instrument", venue="moex-tbank", symbol="SBER-RUB-TQBR")
+    finally:
+        await harness.gateway.downstream.aclose()
     assert out.code == "downstream_unavailable"
     assert "TBANK_TOKEN" in out.data["message"]
+
+
+async def test_mirror_fee_reaches_fills_account_and_trial_log(harness: Harness) -> None:
+    """0.25% per fill on both sides; the fee is in the order's fills, the account PnL and the S6 order intent."""
+    s = await harness.create_session(agent_id="fee", mode="paper", known_at=harness.settings.demo.known_at)
+    rate = harness.settings.brokers.mirror.commission.rate
+    async with harness.agent(s["api_key"]) as a:
+        buy = (await a.call("place_order", **order(harness, qty=10.0))).data["order"]
+        sell = (await a.call("place_order", **order(harness, side="sell", qty=10.0))).data["order"]
+        acct = (await a.call("account")).data["account"]
+    for o in (buy, sell):
+        assert o["fee"] == pytest.approx(round(o["avg_price"] * 10.0 * rate, 2), abs=0.01)
+        assert o["fee"] > 0
+        assert sum(f["fee"] for f in o["fills"]) == pytest.approx(o["fee"])
+    fees = buy["fee"] + sell["fee"]
+    assert acct["fees"] == pytest.approx(fees)
+    spread = (buy["avg_price"] - sell["avg_price"]) * 10.0
+    assert acct["pnl"] == pytest.approx(-spread - fees)
+    intents = [t for t in harness.platform.ledger.trials if "order-intent" in t.tags and t.strategy_id == "fee:mom"]
+    assert [t.metrics["fee"] for t in intents] == [buy["fee"], sell["fee"]]
+    assert all(t.metrics["filled_qty"] == 10.0 for t in intents)

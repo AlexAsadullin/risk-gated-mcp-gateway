@@ -1,167 +1,113 @@
 # HANDOVER: risk-gated-mcp-gateway (Tradeq I9)
 
-Last updated 2026-10-30 by the session that did the MOEX pivot (section "MOEX pivot" at the end overrides older
-text where they disagree). Earlier update: 2026-10-23 by the orchestrating session. It was written from the finishing agent's final report and
-from the repository.
+Last updated 2026-11-05 (local-only trading and the T-Invest commission). Earlier: 2026-10-29/30 MOEX pivot,
+2026-10-23 alignment with the shipped I2, I5 and S6.
 
 ## Goal
 
 The gateway gives AI agents one MCP door to the platform. In research mode every data call is pinned to the
 session clock, so agents cannot see the future. Every idea and backtest becomes a trial in S6, each agent has
-budgets, and orders go only through the shared risk path (I6 for paper, I7 for live). The brief is
-`../prompts/08-risk-gated-mcp-gateway.md`, and the default port is 8608 (MCP at `/mcp`). The project produces
-contract 6.6 and consumes 6.1, 6.3, 6.4 and 6.5.
+budgets, and orders go only through the shared risk path to a broker adapter (contract 6.8): the local mirror
+sandbox for paper by default, I7 for live. Brief: `../prompts/08-risk-gated-mcp-gateway.md` (revision 2); port
+8608 (MCP at `/mcp`). Produces 6.6 and 6.8; consumes 6.1, 6.3, 6.4, 6.5 and 6.7.
+
+User decisions (2026-11-05): trading runs only in our local sandbox, never through T-Bank (not even its sandbox);
+the T-Invest token is for market-data download by I1 only. The mirror charges the real T-Invest commission:
+0.25% of trade value (basic tariff), 0% for T-Bank's own funds (T-Capital ETFs).
 
 ## Stack
 
-Python 3.13 with a uv `.venv` and pins from `../constraints.txt`. Libraries: `mcp` 2.3.0 (MCPServer over
-streamable HTTP and stdio), FastAPI and uvicorn (the admin API), httpx and httpx2, pyarrow (I2 Arrow responses),
-SQLite (sessions), pydantic-settings (`GATEWAY_*`, `config/settings.yaml`), typer (the `gateway` CLI) and
-structlog. Nothing was added beyond the constraints.
+Python 3.13, uv `.venv`, pins from `../constraints.txt`: `mcp` 2.3.0 (streamable HTTP and stdio), FastAPI and
+uvicorn (admin API), httpx, SQLite (sessions), pydantic-settings (`GATEWAY_*`, `config/settings.yaml`), typer,
+structlog.
 
 ## Architecture and data flow
 
-`app.py` mounts the MCP server (`mcp_server.py`, which exposes exactly the 12 tools of contract 6.6) and the admin
-API (`admin.py`) in one ASGI app. A tool call goes through `gateway.py`. That module loads the session
-(`sessions.py`: SQLite, hashed API keys, a forward-only clock), applies `timetravel.py` (it pins every request to
-the session clock and drops returned rows with a later knowledge_time), checks `budgets.py`, and for orders runs
-`risk.py` (whitelist, limit price present, fat-finger band against the I2 reference price, notional and position
-limits). It then calls the downstream clients in `clients/`, logs trials through `trials.py` to S6 with the inbox
-fallback, and writes every decision to the hash-chained audit log in `audit.py`. Refusals are structured
-(`refusals.py`) and come back with `isError: true`. `fakes/` holds in-process FastAPI fakes of all seven
-downstream services, which the demo, the tests and the report use.
+`app.py` mounts the MCP server (`mcp_server.py`) and the admin API (`admin.py`) in one ASGI app and builds the
+`BrokerRouter`. A tool call goes through `gateway.py`: it loads the session (`sessions.py`: SQLite, hashed API keys,
+forward-only clock), applies `timetravel.py`, checks `budgets.py`, and for orders runs `risk.py` (whitelist, limit
+price, fat-finger band against the I2 reference price, notional and position limits, lot/tick/price-band rules).
+Orders, cancels, positions and accounts go to the session's adapter (`brokers/router.py`): `mirror` (default for
+paper; matches against the I2 book and trade tape at the session clock), `shadow` (I6), `execution` (I7, live),
+`tbank-sandbox` (disabled). Trials go to S6 through `trials.py` with the inbox fallback; every decision goes to the
+hash-chained audit log (`audit.py`). Refusals are structured (`refusals.py`, `isError: true`). `fakes/` holds
+in-process fakes of all downstream services for the demo, the tests and the report.
 
 ## Files
 
 | Path | Purpose |
 |---|---|
-| src/mcp_gateway/mcp_server.py, contracts.py, outputs.py | MCP tools and their input and output schemas |
-| src/mcp_gateway/gateway.py | Tool dispatch: session, time travel, budgets, risk, downstream, trials, audit |
+| src/mcp_gateway/mcp_server.py, contracts.py, outputs.py | The 14 MCP tools of contract 6.6 rev. 2 (incl. `market_slice`, `instrument`) and their schemas |
+| src/mcp_gateway/gateway.py | Tool dispatch: session, time travel, budgets, risk, broker, trials, audit |
+| src/mcp_gateway/brokers/base.py, router.py | `BrokerAdapter` protocol, instrument rules, HTTP 6.4 adapter; per-session adapter choice |
+| src/mcp_gateway/brokers/mirror.py, commission.py | Mirror sandbox (matching, accounts, state file); T-Invest commission model |
+| src/mcp_gateway/brokers/tbank_sandbox.py | T-Bank sandbox adapter (kept, disabled by default) |
 | src/mcp_gateway/sessions.py, admin.py, admin_models.py | Sessions, modes, clock, admin API |
 | src/mcp_gateway/timetravel.py, budgets.py, risk.py, refusals.py | Guards |
 | src/mcp_gateway/audit.py | Append-only, hash-chained JSONL audit log and its verifier |
 | src/mcp_gateway/clients/{base,pit,research,ledger,orders}.py, downstream.py | Typed clients for I2, S1, I5, S6, S7, I6, I7 |
 | src/mcp_gateway/fakes/{services,world}.py, harness.py | In-process fakes and the test harness |
-| src/mcp_gateway/bench/{adversary,baseline,latency,stats,report}.py | make report experiments |
-| src/mcp_gateway/demo.py | make reproduce |
+| src/mcp_gateway/bench/, demo.py | `make report` experiments; `make reproduce` |
+| tests/unit, tests/integration, tests/real | Unit tests; in-process tool tests; opt-in real-service test |
 
-## State at handover
+## State at handover (2026-11-05)
 
-Last task (2026-10-23): align with the shipped I2 and S6.
+- `make lint typecheck test`: clean; 107 default tests pass in about 13 s, 97% coverage.
+- `make test-integration` (marker `integration`, deselected by default) passed on 2026-11-05 in about 8 s. It starts
+  `point-in-time-store/.venv/bin/pit serve`, `research-ledger/.venv/bin/ledger serve` and
+  `backtest-orchestrator/.venv/bin/bt serve` (env `BT_PIT__MODE=http`, `BT_PIT__BARS_SOURCE=trades`,
+  `BT_MARKET__VENUE=moex-tbank`, `BT_LEDGER__MODE=http`) on free ports, with scratch data under
+  `tmp/integration-<id>/` (removed on success). It seeds a MOEX tape, runs a research session (data, a look-ahead
+  refusal, an I5 backtest, a refused peek, a verdict with n_trials 2 and sources `{i5: 1, i9: 1}`) and a paper
+  session (mirror fill at the best ask stored in the real I2, `market_slice` from the real I2). Ports 8601-8610
+  should be free first; no process stays running afterwards.
+- Local-only trading: `brokers.tbank_sandbox.enabled: false` (default in code and YAML), `tbank-sandbox` is not in
+  `brokers.allowed_paper`. While disabled the adapter is not built; `POST /admin/v1/sessions` with that broker
+  returns 403 `broker_disabled`; a stored session that names it is refused with `mode_forbidden`; a
+  `brokers.paper`/`brokers.live` default naming it raises `BrokerDisabled` at start. `.env` has no `TBANK_TOKEN`.
+- Commission: `brokers.mirror.commission` (`rate` 0.0025, `zero_fee_rate` 0, `rounding` 0.01 RUB half-up in
+  Decimal, `zero_fee_instruments`, `zero_fee_reference_file`, `zero_fee_reference_key: funds`). Applied per mirror
+  fill, both sides, taker and maker alike. The zero-fee set is the config list (tickers, symbols, FIGIs, uids)
+  plus the `funds` of I1's `$TRADEQ_DATA_DIR/market-tape-recorder/reference/tbank_zero_fee_funds.json`, re-read on
+  mtime change; missing file or missing key logs a warning and falls back to the config list. The old
+  `taker_fee_bps`/`maker_fee_bps` keys were removed.
+- Fee flow (optional fields only, backward compatible): mirror `Order` carries `fee` (total) and new `fills`
+  (`ts_fill`, `price`, `qty`, `fee`, `liquidity`); mirror `Account` carries `fees` and new `pnl` (equity minus
+  opening cash, net of fees); cash is net of fees, so equity and the drawdown budget are too; order-intent trials
+  to S6 add `filled_qty`, `avg_price`, `fee` to `metrics` (values at placement; a resting order's later fills are
+  not re-logged). I6 and I7 compute their own fees; the fake I6 charges none.
+- `make report` was not rerun since the MOEX pivot: README and `docs/report.md` numbers are pre-MOEX (crypto-era
+  fakes, I6 fake). `make reproduce` shows a mirror fill with the new fee.
 
-1. The repo is green: lint and `mypy --strict` are clean, and 69 default tests pass in about 10 s with 97% coverage.
-   One opt-in test (`make test-integration`, marker `integration`) is deselected by default. It passed when run on
-   2026-10-23, taking 3 s. It starts `point-in-time-store/.venv/bin/pit serve` and
-   `research-ledger/.venv/bin/ledger serve` on free ports. Its scratch `TRADEQ_DATA_DIR` is
-   `tmp/integration-<id>/data` (gitignored, removed on success). It seeds I2 with a contract-6.2 tape file through
-   `pit ingest tape.trades` and runs a research session (data, a look-ahead refusal, a logged backtest, a refused
-   peeking backtest, a verdict) and a paper session (the reference price from real I2, an order to the fake I6).
-   It asserts that S6's verdict lists the gateway's `i9` leakage flag.
-2. I2 client (`clients/pit.py`): it sends `format: "json"` in the body and typed filter lists, and parses
-   `{fingerprint, columns, rows, flags}` and `X-Leakage-Flag`. It no longer guesses Arrow, row-list or columnar
-   shapes, and pyarrow was removed as a dependency. `features` uses `POST /v1/features/training-set` (grid spine).
-   Rows are sorted by `valid_time`, because I2 orders them by key columns. The fake I2 now mimics all of this.
-3. S6: `TrialRecord.returns` is now null. Every look-ahead the gateway blocks itself is posted as a `LeakageEvent`
-   (`source: "i9"`, `block`, or `warn` on clamp) with the inbox fallback (`trials.TrialLogger.report_leakage`).
-   Ledger strategy ids changed from `agent/strategy` to `agent:strategy`, because S6's verdict route is
-   `{strategy_id}`, not `{strategy_id:path}`.
-4. Four bugs that S8 reported are fixed:
-   1. The order-rate window and the budget headroom now run on the session clock, so a replayed episode is not
-      treated as one wall-clock minute.
-   2. The gateway sends the session clock to I6/I7 in an `X-Tradeq-Known-At` header. I6's `OrderRequest`
-      forbids extra fields, so it cannot be a body field. The fake I6 fills and marks at the last price known at
-      that time, which equals the I2 reference price.
-   3. `gateway serve --offline` (`make serve-offline`) wires the fakes into the HTTP app.
-   4. The price table now uses current Anthropic rates: Opus 5.5 $4 / $20. Sonnet 5.5, Haiku 5.5 and Sonnet 4.6
-      were added, the unverifiable Sonnet 4.5 row was dropped, and the default (unknown-model) row is priced at
-      the Opus 5.5 rate. The demo model is now `claude-sonnet-5-5`.
-   All four have tests; 73 default tests pass.
-5. `make report` was rerun after these changes. Tables 3 and 4 are unchanged, while the latency numbers moved
-   with machine load (the final run is noisy; see the per-run medians). The README cites the final run.
-   docs/report.md still holds the 2026-10-22 numbers: as instructed, the corrected text went to the orchestrator
-   (scratchpad report-corrected.md) and was not written into the repo.
-6. Contract extensions are unchanged, except that the I2 query-shape assumptions were removed from the README
-   table; the README now documents what was checked against the real services.
+## Open items
 
-7. I5 alignment (2026-10-23, after I5 added `strategy_id`):
-   - `BacktestRequest` now sends `strategy_id` (the agent-scoped id `agent:strategy`), `actor` `{agent,
-     agent_id}` and `seed`. The seed is taken out of `params`, because I5 strategies forbid extra parameters.
-   - When I5 returns a `trial_id`, the gateway does not log its own linked record (`logged_to: "i5"`), so one
-     backtest counts once in S6.
-   - Refused or failed backtests are logged in I5's family (`ledger.backtest_family_template`,
-     `i5/{strategy}/{universe}`), because S6 counts `n_trials` per family.
-   - The fake I5 logs to the fake S6 the way the shipped I5 does.
-   - New test: `verdict` resolves to the id I5 was given.
-   - The opt-in test now also starts `backtest-orchestrator/.venv/bin/bt serve` against the real I2 and S6, with
-     env `BT_PIT__MODE=http`, `BT_PIT__BARS_SOURCE=trades`, `BT_MARKET__VENUE=binance` and
-     `BT_LEDGER__MODE=http`. It runs `sma_cross`, and checks that S6's verdict for `itest:sma_cross` reports
-     n_trials 2 (the I5 trial and the refused peek), sources `{i5: 1, i9: 1}` and actors `{agent: 2}`.
-     It passed in 5.7 s.
-   - Report counts are unaffected; `make report` was not rerun for this change.
+- I1's zero-fee reference file does not exist yet; the shipped `zero_fee_instruments` tickers (TMOS, TRUR, TGLD,
+  TBRU, TMON, TPAY, TDIV, TITR, TOFZ, TLCB) are from memory and unverified. No fund is in `risk.whitelist` or
+  `brokers.instruments`, so zero-fee fills are only unit-tested; add fund instruments (board TQTF) to trade them.
+- Rerun `make report` on the MOEX fakes; a mirror mode that reads the live I1 stream directly; an I7 adapter.
+- Run S8's `make integration` against this gateway: fees changed from 4 bps to 25 bps, which moves S8's PnL.
 
 ## Mistakes and lessons
 
-1. I first built the I2 client from guesses: a `filters` dict, `format` as a query parameter, and several response
-   shapes. The shipped I2 forbids extra fields and takes a filter list, so the real service would have rejected
-   every gateway query with 422. Lesson: read the producer's `models.py` and `api.py` before writing a client, and
-   keep an opt-in test against the real service.
-2. The ledger strategy-id template used `/`. Starlette decodes `%2F` before routing, so S6's verdict route would
-   have answered 404 for every agent strategy. Only the real-service test can catch a mistake like this; the
-   fakes used `{strategy_id:path}` and hid it.
-3. Trials used to carry `returns: {ts: [], values: []}`. S6 accepts that, but `null` is the documented "no
-   returns" value.
-4. Only I2 and S6 are real in any test. I5, S1, S7 and I6 are fakes, and I7 does not exist, so live routing is
-   tested against a second fake.
-5. Session-state locks work per process, so two gateway processes that serve the same session could interleave
-   updates. Run one process per session store.
-6. The order-rate window used the wall clock, and the fake I6 filled at the frozen offline wall clock. Neither
-   bug showed up in this repo's tests, because they never moved a session clock during a paper session. S8's
-   replayed season found both. Lesson: test every budget with a moving session clock.
-7. The price table was written from memory (Opus at 15/75). Verify prices against a current source and record
-   the check date.
-8. Before this fix, I5 logged agent backtests under its own id (`i5-<strategy>-<universe>`) and its own actor,
-   so `verdict()` never found them. The gateway also logged a linked duplicate in a different family. Only the
-   real I5 + S6 test showed how S6 groups trials by family.
-9. Compound shell commands (`cd && ...`) are denied in this environment; use `git -C` and `make -C`.
+1. Build clients from the producer's `models.py`/`api.py`, not guesses, and keep an opt-in real-service test: the
+   first I2 client would have got 422 on every query.
+2. Ledger strategy ids must not contain `/` (S6's verdict route is `{strategy_id}`); the fakes hid this.
+3. Test every budget with a moving session clock: the order-rate window once ran on the wall clock.
+4. Verify prices and tariffs against a current source and record the date and source in config.
+5. Session locks are per process; run one gateway process per session store.
+6. Changing an I9 default (broker, fees) changes what every consumer sees; run the consumers' integration tests
+   (S8 `make integration`) afterwards. Old tests that inspect a specific fake should name their broker.
+7. Compound shell commands (`cd && ...`) may be denied in some environments; `git -C` and `make -C` always work.
 
-## MOEX pivot (2026-10-29/30)
+## Report rerun on the MOEX fakes (2026-11-06)
 
-The user asked for a gateway that is not bound to an exchange, with a sandbox behind MCP that duplicates the real
-market first, and terminals of other exchanges later. Brief: `../prompts/08-risk-gated-mcp-gateway.md`
-revision 2; contracts 6.6 (revision 2), 6.7 and 6.8 in `../prompts/00-platform-conventions.md`.
+`make report` first crashed with `KeyError: 'YDEX-RUB-TQBR'`: the adversary probes a non-whitelisted symbol and
+asks the fake world for its price. `fakes/world.py` now prices unlisted symbols from `UNLISTED_BASE_PRICE`
+(100.0), so the gateway, not the fake, refuses them. Results: guarded 1,181/1,181 violations blocked, 0/2,730
+false refusals; pass-through baseline 42/1,225 blocked (mirror-broker rejections) and 11,620 leaked rows.
+README updated; docs/report.md still has the pre-MOEX numbers.
 
-What changed:
-1. `brokers/`: `base.py` (`BrokerAdapter`, `InstrumentRules`, `ConfiguredRules`, `HttpOrderBroker` around the
-   6.4 `OrderClient`, errors `OrderNotFound` and `BrokerUnavailable`), `mirror.py` (`MirrorBroker` and
-   `PitMarketSource`), `tbank_sandbox.py` (`TBankSandboxBroker`, REST `SandboxService` + `ShareBy`), `router.py`
-   (`BrokerRouter`, built in `app.build_gateway`, closed in the app lifespan).
-2. `gateway.py`: `_order_client` replaced by `_broker(session)`; place, cancel, positions and account go through
-   the adapter inside `refusing_downstream()`, which now maps `OrderNotFound` and `BrokerUnavailable`;
-   `instrument_checks` run with the other pre-trade checks; new tools `instrument` and `market_slice`
-   (`PitClient.slice`, I2 `GET /v1/slice` at the session clock).
-3. Sessions carry `broker` (None for old sessions = the mode's default); `CreateSessionRequest.broker` is checked
-   by `BrokerRouter.check_choice` (422 `invalid_broker`).
-4. Config: MOEX whitelist and rouble limits, `risk.require_instrument_rules`, `brokers.*` (paper default
-   `mirror`), `storage.brokers_dir`, fake world on SBER/GAZP/LKOH with a fake I2 order book (`fakes.book_*`) and
-   a fake `/v1/slice`. `.env` is loaded into the environment for `TBANK_TOKEN`.
-5. Order fill details are `filled_qty`, `avg_price` and `fee` (the names S8 already reads).
-6. Tests: `tests/unit/test_brokers.py` (mirror matching rules with a scripted market, T-Bank adapter with respx,
-   router), mirror end-to-end tests in `tests/integration/test_tools.py`; the older paper tests now create
-   sessions with `broker="shadow"`, because they inspect the I6 fake. The report benchmark (`bench/`) also uses
-   `broker="shadow"` and whole-share quantities; `make report` was not rerun, so `docs/report.md` keeps the
-   2026-10-22/23 numbers from the crypto world.
-7. Sibling changes made for the real-service tests: I5 got MOEX instruments in its config; S8's I9 season moved
-   to MOEX with lot rounding (both committed in their repositories).
-
-State: lint, mypy clean; 90 default tests pass with 97% coverage; `make test-integration` (real I2, I5, S6) passed
-on 2026-10-30, including a mirror fill against a book stored in the real I2; S8's `make integration` against this
-gateway passed (193 fills). `make reproduce` shows the market slice, the instrument rules, a refused fractional
-lot and a mirror fill.
-
-Open items: first T-Bank sandbox run with a real token; rerun `make report` on the MOEX fakes; a mirror mode
-that reads the live I1 stream directly (sub-second) instead of I2 queries; I7 adapter once I7 exists.
-
-Lessons:
-1. Changing a default broker changes what every downstream consumer sees (S8 asserted fills at the reference
-   price). Run the consumers' integration tests (S8 `make integration`) after any change of I9 defaults.
-2. Old tests that inspect a specific fake should name their broker explicitly instead of relying on a default.
+The real-service integration test failed after I5 moved to MOEX sessions: its world sat on Saturday night,
+2025-05-31 22:00Z to 2025-06-01 00:00Z, when MOEX is closed, so I5 had no bars. It now uses Tuesday
+2025-06-03 10:00-12:00Z, inside the main session, and passes again. Lesson: a test world on MOEX must sit
+inside a trading session.

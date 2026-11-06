@@ -14,8 +14,9 @@ Matching rules (the market itself never sees these orders):
 2. A resting limit order enters the queue behind the size already displayed at its price. On every later call
    the trades printed since the last check are replayed: a trade through the price fills the order in full, and
    a trade at the price on the opposite side first reduces the queue ahead, then fills the order.
-3. Quantities must be whole lots and prices must sit on the tick (instrument rules from config); the fee is
-   ``taker_fee_bps`` for liquidity taken and ``maker_fee_bps`` for resting fills.
+3. Quantities must be whole lots and prices must sit on the tick (instrument rules from config); every fill,
+   buy or sell, taker or maker, pays the commission of ``commission.CommissionModel`` (the T-Invest tariff:
+   0.25% of the trade value, 0% for T-Capital funds, rounded to the kopek per fill).
 4. Accounts start with ``initial_cash`` in roubles; equity marks positions at the mid of the latest book.
 
 State (accounts, orders, positions) is kept in memory and written to a JSON file after every change, so a
@@ -34,13 +35,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from mcp_gateway.brokers.base import ConfiguredRules, InstrumentRules, OrderNotFound
+from mcp_gateway.brokers.commission import CommissionModel
 from mcp_gateway.clients.pit import PitClient
 from mcp_gateway.contracts import Account, Order, OrderRequest, OrderStatus, PitFilter, PitQuery, Position
 from mcp_gateway.risk import on_grid
 from mcp_gateway.settings import MirrorSettings
 from mcp_gateway.timeutil import NS_PER_SECOND, ns_to_iso, parse_iso, to_ns
 
-BPS = 10_000.0
 EPS = 1e-9
 TERMINAL: frozenset[str] = frozenset({"filled", "cancelled", "rejected"})
 
@@ -181,6 +182,10 @@ class MirrorOrder:
             filled_qty=self.filled,
             avg_price=self.avg_price(),
             fee=sum(f.fee for f in self.fills),
+            fills=[
+                {"ts_fill": ns_to_iso(f.ts_ns), "price": f.price, "qty": f.qty, "fee": f.fee, "liquidity": f.liquidity}
+                for f in self.fills
+            ],
             broker="mirror",
         )
 
@@ -198,6 +203,7 @@ class MirrorAccount:
     currency: str
     positions: dict[str, MirrorPosition] = field(default_factory=dict)
     fees: float = 0.0
+    deposited: float | None = None  # opening cash; None in state files written before it was recorded
 
 
 def _key(venue: str, symbol: str) -> str:
@@ -215,8 +221,10 @@ class MirrorBroker:
         cfg: MirrorSettings,
         state_path: Path | None,
         clock_ns: Any,
+        commission: CommissionModel | None = None,
     ) -> None:
         self._source = source
+        self.commission = commission or CommissionModel(cfg.commission)
         self._rules = rules
         self._cfg = cfg
         self._state_path = state_path
@@ -259,12 +267,12 @@ class MirrorBroker:
 
     def _account(self, account_id: str) -> MirrorAccount:
         if account_id not in self._accounts:
-            self._accounts[account_id] = MirrorAccount(cash=self._cfg.initial_cash, currency=self._cfg.currency)
+            cash = self._cfg.initial_cash
+            self._accounts[account_id] = MirrorAccount(cash=cash, currency=self._cfg.currency, deposited=cash)
         return self._accounts[account_id]
 
     def _apply_fill(self, order: MirrorOrder, price: float, qty: float, ts_ns: int, liquidity: str) -> None:
-        fee_bps = self._cfg.taker_fee_bps if liquidity == "taker" else self._cfg.maker_fee_bps
-        fee = price * qty * fee_bps / BPS
+        fee = self.commission.fee(order.symbol, price, qty)
         order.fills.append(MirrorFill(ts_ns, price, qty, liquidity, fee))
         order.filled += qty
         account = self._account(order.account_id)
@@ -469,12 +477,15 @@ class MirrorBroker:
         account = self._account(account_id)
         marks = await self._marks(account, now_iso)
         value = sum(p.qty * (marks.get(k) or p.last_price or 0.0) for k, p in account.positions.items())
+        equity = account.cash + value
+        deposited = self._cfg.initial_cash if account.deposited is None else account.deposited
         return Account(
             account_id=account_id,
-            equity=account.cash + value,
+            equity=equity,
             balance=account.cash,
             currency=account.currency,
             fees=account.fees,
+            pnl=equity - deposited,  # marked at the mid, net of every commission paid
             broker="mirror",
         )
 

@@ -34,7 +34,13 @@ def build_gateway(
     clock = clock or SystemClock()
     downstream: Downstream = build_downstream(settings.services, transports)
     gateway_clock = clock
-    brokers = BrokerRouter(settings.brokers, downstream, settings.broker_state_dir, lambda: to_ns(gateway_clock.now()))
+    brokers = BrokerRouter(
+        settings.brokers,
+        downstream,
+        settings.broker_state_dir,
+        lambda: to_ns(gateway_clock.now()),
+        zero_fee_file=settings.zero_fee_reference_path,
+    )
     return Gateway(
         settings=settings,
         store=SessionStore(settings.sessions_db_path),

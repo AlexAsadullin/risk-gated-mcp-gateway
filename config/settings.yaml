@@ -147,7 +147,8 @@ orders:
 brokers:
   paper: mirror                  # paper sessions trade a copy of the real market by default
   live: execution                # I7 (contract 6.4); live is disabled in modes.live_enabled
-  allowed_paper: [mirror, shadow, tbank-sandbox]
+  # Trading is local only: tbank-sandbox is refused while brokers.tbank_sandbox.enabled is false.
+  allowed_paper: [mirror, shadow]
   instruments:                   # lot and tick from the MOEX securities table; checked live by I1 and T-Bank
     - { venue: moex-tbank, symbol: SBER-RUB-TQBR, lot_size: 1, tick: 0.01, currency: RUB, price_band_bps: 2000 }
     - { venue: moex-tbank, symbol: GAZP-RUB-TQBR, lot_size: 10, tick: 0.01, currency: RUB, price_band_bps: 2000 }
@@ -155,14 +156,25 @@ brokers:
   mirror:
     initial_cash: 10000000.0     # roubles per new account
     currency: RUB
-    taker_fee_bps: 4.0           # broker plus exchange fee, a typical retail tariff
-    maker_fee_bps: 4.0
+    commission:                  # per fill, buys and sells, taker and maker alike
+      source: "T-Invest basic tariff per user, 2026-11-05"
+      currency: RUB
+      rate: 0.0025               # 0.25% of the trade value (price * qty)
+      zero_fee_rate: 0.0         # T-Bank's own funds (ETFs managed by T-Capital)
+      rounding: 0.01             # roubles: each fill's fee is rounded half-up to the kopek
+      # Tickers, symbols, FIGIs or instrument uids; merged with the reference file below. These tickers are
+      # T-Capital funds listed from memory, not checked against T-Bank; the I1 file is authoritative.
+      zero_fee_instruments: [TMOS, TRUR, TGLD, TBRU, TMON, TPAY, TDIV, TITR, TOFZ, TLCB]
+      zero_fee_reference_file: market-tape-recorder/reference/tbank_zero_fee_funds.json  # under TRADEQ_DATA_DIR; "" = off
+      zero_fee_reference_key: funds
     book_dataset: tape.book_snapshot
     trades_dataset: tape.trades
     book_lookback_s: 3600.0
     max_book_age_s: 600.0        # no book newer than this -> the order is rejected (no_market_data)
     state_file: mirror-state.json
   tbank_sandbox:
+    # Off: trading never goes through T-Bank (not even its sandbox); the T-Invest token is for I1 market data.
+    enabled: false
     base_url: "https://sandbox-invest-public-api.tbank.ru/rest/"
     service_prefix: tinkoff.public.invest.api.contract.v1
     token_env: TBANK_TOKEN

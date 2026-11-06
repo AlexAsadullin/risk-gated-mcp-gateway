@@ -23,7 +23,7 @@ from mcp_gateway import budgets as bud
 from mcp_gateway.admin_models import CreateSessionRequest, CreateSessionResponse, SessionView
 from mcp_gateway.audit import AuditLog, Decision
 from mcp_gateway.brokers.base import BrokerAdapter, BrokerUnavailable, OrderNotFound
-from mcp_gateway.brokers.router import BrokerRouter, UnknownBroker
+from mcp_gateway.brokers.router import BrokerDisabled, BrokerRouter, UnknownBroker
 from mcp_gateway.clients.base import DownstreamError, DownstreamUnavailable
 from mcp_gateway.clients.pit import PitLeakage
 from mcp_gateway.contracts import (
@@ -138,6 +138,15 @@ def _summarise(output: BaseModel) -> dict[str, Any]:
     return data
 
 
+FILL_METRICS = ("filled_qty", "avg_price", "fee")
+
+
+def fill_metrics(order: Order) -> dict[str, Any]:
+    """Fill details the adapter reported (mirror: filled quantity, average price, commission in roubles)."""
+    extra = order.model_extra or {}
+    return {k: extra[k] for k in FILL_METRICS if isinstance(extra.get(k), int | float)}
+
+
 def _entity(symbol: str, separator: str) -> str:
     return symbol.split(separator, 1)[0]
 
@@ -219,6 +228,8 @@ class Gateway:
             raise AdminRejection(422, "invalid_clock", "research sessions need known_at")
         try:
             broker = self.brokers.check_choice(request.mode, request.broker)
+        except BrokerDisabled as exc:
+            raise AdminRejection(403, "broker_disabled", str(exc)) from exc
         except UnknownBroker as exc:
             raise AdminRejection(422, "invalid_broker", str(exc)) from exc
         api_key = generate_api_key(self.settings.auth.api_key_bytes)
@@ -525,7 +536,11 @@ class Gateway:
 
     def _broker(self, session: Session) -> BrokerAdapter:
         """Contract 6.8: the session's execution adapter (its own choice, else the mode's default)."""
-        return self.brokers.get(session.broker or self.brokers.default_for(session.mode))
+        try:
+            return self.brokers.get(session.broker or self.brokers.default_for(session.mode))
+        except BrokerDisabled as exc:
+            # A session stored before the adapter was switched off: refuse instead of reaching the broker.
+            raise Refusal(RefusalCode.MODE_FORBIDDEN, str(exc), details={"broker": session.broker}) from exc
 
     def _require_trading(self, session: Session) -> None:
         if session.mode is Mode.RESEARCH:
@@ -894,7 +909,7 @@ class Gateway:
                 raise
             trial |= {
                 "params": idea | {"order_id": order.order_id, "reference_price": ref},
-                "metrics": {"status": order.status},
+                "metrics": {"status": order.status} | fill_metrics(order),
                 "tags": [f"routed:{routed_to}", f"status:{order.status}"],
             }
             logged = await self._log_trial(session, trial | {"finished_at": self.clock.now()})

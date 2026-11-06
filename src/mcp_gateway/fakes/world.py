@@ -15,6 +15,8 @@ from datetime import datetime
 from mcp_gateway.settings import FakeSettings
 from mcp_gateway.timeutil import NS_PER_SECOND, to_ns
 
+UNLISTED_BASE_PRICE = 100.0
+
 
 @dataclass
 class SyntheticWorld:
@@ -30,7 +32,9 @@ class SyntheticWorld:
         return ts_ns // (self.bar_seconds * NS_PER_SECOND)
 
     def price_at_index(self, symbol: str, index: int) -> float:
-        base = self.base_prices[symbol]
+        # Symbols outside the fake whitelist (adversarial probes) still get a price, so the attack can be built
+        # and the gateway, not the fake, is what refuses it.
+        base = self.base_prices.get(symbol, UNLISTED_BASE_PRICE)
         z = random.Random(f"{self.seed}:{symbol}:{index}").gauss(0.0, 1.0)
         cycle = self.cycle_amplitude * math.sin(2 * math.pi * index / self.cycle_bars)
         return base * math.exp(cycle + self.noise_scale * z)

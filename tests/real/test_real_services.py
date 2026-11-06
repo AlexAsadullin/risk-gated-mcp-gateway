@@ -1,9 +1,10 @@
-"""Opt-in: the gateway against the shipped I2 (point-in-time-store) and S6 (research-ledger) services.
+"""Opt-in: the gateway against the shipped I2 (point-in-time-store), I5 (backtest-orchestrator) and S6
+(research-ledger) services.
 
-Run with ``make test-integration`` (``pytest -m integration``). Both services start as subprocesses from their
+Run with ``make test-integration`` (``pytest -m integration``). The services start as subprocesses from their
 own repositories' ``.venv``; nothing in those repositories is modified. All data goes to a scratch
 ``TRADEQ_DATA_DIR`` under this repository's gitignored ``tmp/`` folder, never the shared data root. I2 is seeded
-through its own CLI (``pit ingest tape.trades``) from a contract-6.2 tape file. I5, S1, S7 and I6 stay fakes.
+through its own CLI (``pit ingest``) from contract-6.2 tape files. S1, S7 and I6 stay fakes.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ BT_BIN = BT_REPO / ".venv" / "bin"
 BT_STRATEGY = "sma_cross"  # registered in I5 (GET /v1/strategies)
 BT_PARAMS = {"fast": 2, "slow": 5, "qty": 10.0, "seed": 3}  # the gateway moves seed to I5's own field
 STARTUP_TIMEOUT_S = 60.0
-KNOWN_AT = "2025-06-01T00:00:00Z"
+KNOWN_AT = "2025-06-03T12:00:00Z"  # a Tuesday, 15:00 MSK: inside the MOEX main session
 NS = 1_000_000_000
 
 # Runs inside I2's own interpreter (it has pyarrow); writes I1 tape files per contract 6.2 revision 2 (MOEX):
@@ -53,7 +54,7 @@ def common(k, ts):
     return {"venue": ["moex-tbank"] * k, "symbol": ["SBER-RUB-TQBR"] * k,
             "ts_exchange": pa.array(ts, pa.int64()), "ts_local": pa.array([t + 1_000_000_000 for t in ts], pa.int64()),
             "capture_region": ["test"] * k, "connection_id": ["c1"] * k, "seq": pa.array([None] * k, pa.int64())}
-out = base / "channel=trades/symbol=SBER-RUB-TQBR/date=2025-05-31/part-0.parquet"
+out = base / "channel=trades/symbol=SBER-RUB-TQBR/date=2025-06-03/part-0.parquet"
 out.parent.mkdir(parents=True, exist_ok=True)
 ts = [start_ns + i * 60_000_000_000 for i in range(n)]
 pq.write_table(pa.table({**common(n, ts),
@@ -63,7 +64,7 @@ last = ts[-1] - 30_000_000_000
 mid = 280.0 + (n - 1) / 100
 bids = [("bid", round(mid - 0.01 * (k + 1), 2), k) for k in range(5)]
 levels = bids + [("ask", round(mid + 0.01 * k, 2), k) for k in range(5)]
-book = base / "channel=book_snapshot/symbol=SBER-RUB-TQBR/date=2025-05-31/part-0.parquet"
+book = base / "channel=book_snapshot/symbol=SBER-RUB-TQBR/date=2025-06-03/part-0.parquet"
 book.parent.mkdir(parents=True, exist_ok=True)
 pq.write_table(pa.table({**common(10, [last] * 10),
     "side": [lv[0] for lv in levels], "price": [lv[1] for lv in levels], "size": [100.0] * 10,
@@ -127,7 +128,7 @@ def real_services() -> Iterator[RealServices]:
         "BT_LEDGER__BASE_URL": ledger_url,
     }
     tape_root = data_dir / "market-tape-recorder" / "tape"
-    start_ns = (1748736000 - 2 * 3600) * NS  # 2025-05-31T22:00:00Z, two hours before KNOWN_AT
+    start_ns = (1748952000 - 2 * 3600) * NS  # 2025-06-03T10:00:00Z, two hours before KNOWN_AT
     subprocess.run(
         [str(PIT_BIN / "python"), "-c", TAPE_WRITER, str(tape_root), str(start_ns), "120"],
         check=True,
@@ -182,16 +183,16 @@ async def test_research_and_paper_session_against_real_i2_and_s6(
     tape = {"venue": d.venue, "symbol": d.symbol, "channel": "trades"}
     research = await h.create_session(agent_id="itest", mode="research", known_at=KNOWN_AT)
     async with h.agent(research["api_key"]) as agent:
-        data = await agent.call("market_data", **tape, start="2025-05-31T23:00:00Z", end=KNOWN_AT)
+        data = await agent.call("market_data", **tape, start="2025-06-03T11:00:00Z", end=KNOWN_AT)
         assert not data.is_error, data.data
         rows = data.data["rows"]
         assert data.data["n_rows"] == 60
         assert data.data["fingerprint"].startswith("sha256:")
         assert data.data["leakage_flags"] == []
         assert all(r["knowledge_time"] <= KNOWN_AT for r in rows)
-        assert rows[-1]["valid_time"].startswith("2025-05-31T23:59:00")
+        assert rows[-1]["valid_time"].startswith("2025-06-03T11:59:00")
 
-        leak = await agent.call("market_data", **tape, start="2025-05-31T23:00:00Z", end="2025-06-01T01:00:00Z")
+        leak = await agent.call("market_data", **tape, start="2025-06-03T11:00:00Z", end="2025-06-03T13:00:00Z")
         assert leak.code == "time_travel"
 
         bt = await agent.call(
@@ -199,7 +200,7 @@ async def test_research_and_paper_session_against_real_i2_and_s6(
             strategy=BT_STRATEGY,
             params=BT_PARAMS,
             universe=[d.symbol],
-            start="2025-05-31T22:00:00Z",
+            start="2025-06-03T10:00:00Z",
             end=KNOWN_AT,
             fidelity="vectorised",
         )
@@ -210,8 +211,8 @@ async def test_research_and_paper_session_against_real_i2_and_s6(
             strategy=BT_STRATEGY,
             params=BT_PARAMS,
             universe=[d.symbol],
-            start="2025-05-31T22:00:00Z",
-            end="2025-06-02T00:00:00Z",
+            start="2025-06-03T10:00:00Z",
+            end="2025-06-04T12:00:00Z",
             fidelity="vectorised",
         )
         assert peek.code == "time_travel"

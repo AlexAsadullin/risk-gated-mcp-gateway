@@ -6,16 +6,29 @@ from collections.abc import Callable
 from pathlib import Path
 
 from mcp_gateway.brokers.base import BrokerAdapter, ConfiguredRules, HttpOrderBroker
+from mcp_gateway.brokers.commission import CommissionModel
 from mcp_gateway.brokers.mirror import MarketSource, MirrorBroker, PitMarketSource
 from mcp_gateway.brokers.tbank_sandbox import TBankSandboxBroker
 from mcp_gateway.downstream import Downstream
 from mcp_gateway.settings import BrokerSettings, Mode
 
 KNOWN = ("mirror", "shadow", "execution", "tbank-sandbox")
+TBANK = "tbank-sandbox"
 
 
 class UnknownBroker(ValueError):
     pass
+
+
+class BrokerDisabled(UnknownBroker):
+    """The adapter exists but configuration switched it off (the T-Bank sandbox, unless explicitly enabled)."""
+
+
+def tbank_disabled_message() -> str:
+    return (
+        f"broker {TBANK!r} is disabled (brokers.tbank_sandbox.enabled is false): trading runs only in the local "
+        "mirror sandbox; the T-Invest token is for market data"
+    )
 
 
 class BrokerRouter:
@@ -28,10 +41,14 @@ class BrokerRouter:
         state_dir: Path | None,
         clock_ns: Callable[[], int],
         market: MarketSource | None = None,
+        zero_fee_file: Path | None = None,
     ) -> None:
         for name in (cfg.paper, cfg.live, *cfg.allowed_paper):
             if name not in KNOWN:
                 raise UnknownBroker(f"unknown broker {name!r}; known: {', '.join(KNOWN)}")
+        if not cfg.tbank_sandbox.enabled and TBANK in (cfg.paper, cfg.live):
+            # A default must never point at T-Bank by accident: refuse to start instead of failing per order.
+            raise BrokerDisabled(tbank_disabled_message())
         self.cfg = cfg
         self.rules = ConfiguredRules(cfg.instruments)
 
@@ -44,15 +61,19 @@ class BrokerRouter:
             cfg.mirror,
             state(cfg.mirror.state_file),
             clock_ns,
+            CommissionModel(cfg.mirror.commission, zero_fee_file),
         )
         self._adapters: dict[str, BrokerAdapter] = {
             "shadow": HttpOrderBroker("shadow", "i6", downstream.shadow, self.rules),
             "execution": HttpOrderBroker("execution", "i7", downstream.execution, self.rules),
             "mirror": self.mirror,
-            "tbank-sandbox": TBankSandboxBroker(cfg.tbank_sandbox, state(cfg.tbank_sandbox.state_file)),
         }
+        if cfg.tbank_sandbox.enabled:
+            self._adapters[TBANK] = TBankSandboxBroker(cfg.tbank_sandbox, state(cfg.tbank_sandbox.state_file))
 
     def get(self, name: str) -> BrokerAdapter:
+        if name == TBANK and not self.cfg.tbank_sandbox.enabled:
+            raise BrokerDisabled(tbank_disabled_message())
         try:
             return self._adapters[name]
         except KeyError:
@@ -65,6 +86,8 @@ class BrokerRouter:
         """The broker a new session will use; a paper session may pick any of ``allowed_paper``."""
         if name is None:
             return self.default_for(mode)
+        if name == TBANK and not self.cfg.tbank_sandbox.enabled:
+            raise BrokerDisabled(tbank_disabled_message())
         if mode is Mode.LIVE and name != self.cfg.live:
             raise UnknownBroker(f"live sessions use {self.cfg.live!r}")
         if mode is Mode.PAPER and name not in self.cfg.allowed_paper:
@@ -72,5 +95,6 @@ class BrokerRouter:
         return name
 
     async def aclose(self) -> None:
-        for name in ("mirror", "tbank-sandbox"):
-            await self._adapters[name].aclose()
+        for name in ("mirror", TBANK):
+            if name in self._adapters:
+                await self._adapters[name].aclose()

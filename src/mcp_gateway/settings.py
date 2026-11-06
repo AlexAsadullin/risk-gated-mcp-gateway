@@ -32,7 +32,7 @@ def settings_file() -> Path:
 
 
 class Mode(StrEnum):
-    """Session mode. Research is time-travel pinned; paper routes to I6; live routes to I7."""
+    """Session mode. Research is time-travel pinned; paper uses ``brokers.paper`` (the mirror); live uses I7."""
 
     RESEARCH = "research"
     PAPER = "paper"
@@ -249,13 +249,31 @@ class InstrumentRule(BaseModel):
     price_band_bps: float | None = Field(default=None, gt=0)
 
 
+class CommissionSettings(BaseModel):
+    """Broker commission of the mirror sandbox: a fraction of each fill's trade value, on buys and sells alike.
+
+    ``rate`` applies to every instrument except the zero-fee set, which pays ``zero_fee_rate``. The set is the
+    union of ``zero_fee_instruments`` (tickers, symbols, FIGIs or instrument uids) and, when the file exists, the
+    funds listed under ``zero_fee_reference_key`` in ``zero_fee_reference_file`` (relative to
+    ``TRADEQ_DATA_DIR``; an empty string disables it). Each fill's fee is rounded half-up to ``rounding``.
+    """
+
+    source: str
+    currency: str
+    rate: float = Field(ge=0, lt=1)
+    zero_fee_rate: float = Field(ge=0, lt=1)
+    rounding: float = Field(gt=0)
+    zero_fee_instruments: list[str]
+    zero_fee_reference_file: str
+    zero_fee_reference_key: str
+
+
 class MirrorSettings(BaseModel):
     """The built-in sandbox that matches orders against the real order book read from I2 (contract 6.8)."""
 
     initial_cash: float = Field(gt=0)
     currency: str
-    taker_fee_bps: float = Field(ge=0)
-    maker_fee_bps: float = Field(ge=0)
+    commission: CommissionSettings
     book_dataset: str
     trades_dataset: str
     book_lookback_s: float = Field(gt=0)
@@ -264,8 +282,13 @@ class MirrorSettings(BaseModel):
 
 
 class TBankSandboxSettings(BaseModel):
-    """T-Bank Invest API sandbox over its REST proxy; the token comes only from ``token_env``."""
+    """T-Bank Invest API sandbox over its REST proxy; the token comes only from ``token_env``.
 
+    Off by default (``enabled: false``): trading runs in the local mirror sandbox only, and the T-Invest token is
+    for market-data download (I1). While disabled, no session can choose this adapter.
+    """
+
+    enabled: bool = False
     base_url: str
     service_prefix: str
     token_env: str
@@ -394,6 +417,12 @@ class Settings(BaseSettings):
     def broker_state_dir(self) -> Path:
         """Where broker adapters keep their state (mirror accounts, T-Bank sandbox account map)."""
         return self.project_dir / self.storage.brokers_dir
+
+    @property
+    def zero_fee_reference_path(self) -> Path | None:
+        """I1's list of zero-commission funds (read-only), or None when the setting is empty."""
+        relpath = self.brokers.mirror.commission.zero_fee_reference_file
+        return self.data_dir / relpath if relpath else None
 
     @property
     def demo_dir(self) -> Path:
